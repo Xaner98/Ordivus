@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
+from ordivus import net
 from ordivus.adapters.base import AuthorizationError, PermanentError, TransientError
 
 TIMEOUT = 10
@@ -32,11 +33,11 @@ def request(url: str, method: str, path: str, token: str | None = None, body: di
     req = urllib.request.Request(f"{url.rstrip('/')}/v1/{path}", data, headers, method=method)
     for attempt in range(RETRIES if method == "GET" else 1):  # nur lesende Anfragen sind gefahrlos wiederholbar
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
-                status, raw = resp.status, resp.read()
+            with net.urlopen(req, TIMEOUT, ctx) as resp:
+                status, raw = resp.status, net.read(resp)
             break
         except urllib.error.HTTPError as e:
-            status, raw = e.code, e.read()
+            status, raw = e.code, net.read(e)
             break
         except (OSError, ValueError) as e:  # URLError, Timeout, TLS-Fehler, ungültige URL
             if attempt == RETRIES - 1 or method != "GET" or isinstance(e, ValueError | ssl.SSLError):

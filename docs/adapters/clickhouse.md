@@ -29,6 +29,7 @@ spec:
 ```
 
 - Anmeldung per HTTP Basic Auth im Header; SQL steht ausschließlich im POST-Body, nie in der URL.
+- `host` ist ein reiner Hostname bzw. eine IP-Adresse (kein `/`, `@`, `?`, `#`, Leerzeichen). Redirects folgt Ordivus nie (Basic-Auth-Header gingen sonst an das Redirect-Ziel); ein Redirect ist ein Fehler.
 - Fehler werden über den Header `X-ClickHouse-Exception-Code` eingeordnet: Rechte-/Anmeldefehler (497, 516, 192) → `AuthorizationError` (Kind `forbidden`), Timeouts/Netz/Überlast → `TransientError`, alles andere → `PermanentError`.
 - `plan` und `drift` senden bei **jeder** Anfrage die Einstellung `readonly=2`; ClickHouse lehnt dann jedes DDL/DCL ab (Code 164 `READONLY`). Zusätzlich verweigert der Adapter `apply` auf einer Read-only-Session.
 
@@ -108,9 +109,23 @@ Ein Grant-Objekt ist die Menge der Privilegien eines Grantees auf genau einem Ob
 **Normalisierung und Fallstricke:** ClickHouse speichert Privilegien in einer eigenen Form (`system.grants`) – Gruppen werden aufgefächert, vollständige Gruppen wieder zusammengefasst. Ordivus vergleicht Großschreibung mit einfachen Leerzeichen, sortiert und ohne Duplikate. Damit der Vergleich stabil ist:
 
 - Privilegien so angeben, wie `SHOW GRANTS` sie zeigt. Wer z. B. alle vier `SHOW …`-Unterrechte einzeln deklariert, erhält dauerhaft ein `UPDATE`, weil ClickHouse sie zu `SHOW` zusammenfasst.
-- `ALL`/`ALL PRIVILEGES` werden abgelehnt (expandiert serverseitig je nach Version).
+- `ALL`/`ALL PRIVILEGES`, `NONE`/`USAGE`/`NO PRIVILEGES` und `CURRENT GRANTS` werden bei der Validierung immer abgelehnt: sie expandieren serverseitig (`CURRENT GRANTS` = alle Rechte des Ordivus-Logins, also Vollzugriff inklusive Benutzerverwaltung).
+- Grants auf die Systemdatenbanken `system`, `information_schema` und `INFORMATION_SCHEMA` werden immer abgelehnt.
+- Unbekannte Privilegnamen (nicht in `system.privileges`, auch nicht als Alias) sind `BLOCKED`.
+- Quellenrechte wie `FILE`, `S3`, `URL` speichert ClickHouse 25.x als `READ`/`WRITE` auf dem jeweiligen Quellobjekt; die Discovery modelliert das Quellobjekt nicht, solche Grants enden nach dem Anlegen als `unverified`.
 - Spalten-Grants (`SELECT(col)`), Teil-Revokes und `WITH GRANT OPTION` modelliert der Adapter nicht. Solche Einträge erscheinen als eigene, nicht änderbare Objekte (`manageable: false`) mit Zusatz in der ID, z. B. `(with grant option)`, und werden nie gelöscht.
 - Privilegien von Rollen, die ein Benutzer erbt, gehören zur Rolle, nicht zum Benutzer.
+
+## Privilegierte Rechte (`allowPrivilegedGrants`)
+
+Ohne die Operator-Policy `allowPrivilegedGrants: true` sind folgende Deklarationen `BLOCKED` (in `apply` Exit 11). Geprüft wird im Plan gegen `system.privileges` des Servers, d. h. Aliase (`SHUTDOWN`, `INTROSPECTION FUNCTIONS` …) und alle Unterrechte einer Gruppe zählen mit:
+
+- Gruppen samt allen Unterrechten: `ACCESS MANAGEMENT` (u. a. `CREATE/ALTER/DROP USER`, `CREATE/ALTER/DROP ROLE`, `ROLE ADMIN`, Row Policies, Quotas, Settings-Profile, `SHOW ACCESS`), `SYSTEM` (alle `SYSTEM …`), `SOURCES`, `READ`/`WRITE` (Quellen), `INTROSPECTION`, `NAMED COLLECTION ADMIN` (u. a. `SHOW NAMED COLLECTIONS SECRETS`), `displaySecretsInShowAndSelect`, `KILL QUERY`, `KILL TRANSACTION`, `SET DEFINER`, `CLUSTER`, `TABLE ENGINE`, `MOVE PARTITION BETWEEN SHARDS`, `CREATE FUNCTION`, `DROP FUNCTION`.
+- Jedes direkte Unterrecht von `ALL` auf globaler Ebene, also alle Quellen wie `FILE`, `URL`, `REMOTE`, `S3`, `HDFS`, `MYSQL`, `POSTGRES`, `JDBC`, `KAFKA` … (auch künftige).
+- Jeder globale Grant (`*.*`, also ohne `database`), auch `SELECT`.
+- `DatabaseUser.roles`/`defaultRoles` mit einer Rolle, die (direkt oder über andere Rollen) einen privilegierten oder globalen Grant oder `WITH GRANT OPTION` trägt, oder die der Ordivus-Login selbst hat.
+
+Immer gesperrt, auch mit `allowPrivilegedGrants`: Grants an den Ordivus-Login und an seine Rollen, unbekannte Privilegien und alles außerhalb des Scopes (siehe unten). `WITH GRANT OPTION` modelliert der Adapter nicht.
 
 ## Discovery und Scope
 
@@ -121,12 +136,12 @@ Ein Grant-Objekt ist die Menge der Privilegien eines Grantees auf genau einem Ob
 | `DatabaseUser` | `system.users` (`storage`, `host_*`), `system.role_grants` |
 | `Grant` | `system.grants` |
 
-`spec.scope.databases.include` (Globs) beschränkt `Database` und datenbankbezogene Grants; globale Grants (`*.*`) gehören immer dazu. Benutzer und Rollen sind nicht datenbankgebunden und werden über `ReconciliationPolicy.spec.scope.DatabaseUser`/`DatabaseRole` (exact/glob) eingegrenzt. Fehlen die Rechte für eine Systemtabelle, ist das Kind `forbidden`, nie „leer“.
+`spec.scope.databases.include` (Globs) beschränkt `Database` und datenbankbezogene Grants. Ist ein Scope gesetzt, gehören globale Grants (`*.*`) **nicht** dazu: sie werden weder inventarisiert noch angelegt. Deklarierte Datenbanken und Grants außerhalb des Scopes sind im Plan `BLOCKED` („outside spec.scope.databases“), `apply` verweigert sie zusätzlich selbst – sonst entstünden Objekte, die die Discovery nie sieht. Benutzer und Rollen sind nicht datenbankgebunden und werden über `ReconciliationPolicy.spec.scope.DatabaseUser`/`DatabaseRole` (exact/glob) eingegrenzt. Fehlen die Rechte für eine Systemtabelle, ist das Kind `forbidden`, nie „leer“.
 
 ## Geschützte Systemobjekte
 
 - Datenbanken `system`, `information_schema`, `INFORMATION_SCHEMA`, `default` sind Systemobjekte (`IGNORE`, nie gelöscht).
-- Der Benutzer, als der Ordivus verbunden ist (`currentUser()`), und seine Grants sind Systemobjekte – Schutz vor Selbstaussperrung.
+- Der Benutzer, als der Ordivus verbunden ist (`currentUser()`), seine Rollen (auch transitiv über andere Rollen) und deren Grants sind Systemobjekte – Schutz vor Selbstaussperrung: nie entzogen, gelöscht oder geändert.
 - Benutzer und Rollen aus Konfigurationsdateien sind nicht änderbar (siehe unten).
 
 ## users.xml-Verwaltung wird nicht empfohlen
@@ -150,7 +165,7 @@ Typischer Fall: der per `CLICKHOUSE_USER` im offiziellen Container angelegte Adm
 
 Der Verbindungsbenutzer braucht:
 
-- Lesen: `SHOW USERS, SHOW ROLES` (bzw. `SHOW ACCESS`) und Zugriff auf `system.databases`, `system.users`, `system.roles`, `system.role_grants`, `system.grants`.
+- Lesen: `SHOW USERS, SHOW ROLES` (bzw. `SHOW ACCESS`) und Zugriff auf `system.databases`, `system.users`, `system.roles`, `system.role_grants`, `system.grants`, `system.privileges` (für die Rechteprüfung im Plan).
 - Schreiben: `ACCESS MANAGEMENT` (bzw. `CREATE/ALTER/DROP USER`, `CREATE/DROP ROLE`, `ROLE ADMIN`), `CREATE DATABASE`, `DROP DATABASE` (nur für Löschungen) und jedes Privileg, das er vergeben soll, **`WITH GRANT OPTION`**.
 
 Beispiel (als Admin mit `access_management`):
@@ -167,5 +182,5 @@ GRANT CURRENT GRANTS ON *.* TO ordivus WITH GRANT OPTION;
 ## Grenzen
 
 - Keine Sperre während `apply` (ClickHouse hat keine Advisory Locks); parallele `apply`-Läufe gegen dasselbe Target vermeiden.
-- Nicht modelliert: Settings-Profile, Quotas, Row Policies, Rolle-an-Rolle-Grants, `GRANT OPTION`, Spalten-Grants, Authentifizierung außer `sha256_password` (LDAP, Kerberos, Zertifikate).
+- Nicht modelliert: Settings-Profile, Quotas, Row Policies, Rolle-an-Rolle-Grants, `GRANT OPTION`, Spalten-Grants, Quellobjekte von `READ`/`WRITE`, Authentifizierung außer `sha256_password` (LDAP, Kerberos, Zertifikate).
 - `Database.engine` ohne Parameter; Engine-Wechsel wird nie ausgeführt.

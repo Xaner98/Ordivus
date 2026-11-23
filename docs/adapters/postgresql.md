@@ -39,8 +39,10 @@ spec:
 
 Für Produktion `tls.mode: verify-full` mit einer `caFile` aus der Laufzeitumgebung verwenden: Ein
 umgeleiteter Host scheitert dann am Zertifikat, bevor das Passwort gesendet wird. Jeder andere Modus
-als `verify-ca`/`verify-full` (auch der Default `prefer`) gilt als unsichere Verbindung: Warnung und
+als `verify-full` (auch der Default `prefer`) gilt als unsichere Verbindung: Warnung und
 `insecureTransport: true` im Report, mit Operator Policy `requireTls: true` Abbruch (Exit-Code 11).
+Auch `verify-ca` zählt als unsicher: Es prüft die CA, aber nicht den Hostnamen, akzeptiert also jedes
+Zertifikat derselben CA (z. B. das eines anderen Servers).
 
 ## Kind `DatabaseRole` und `DatabaseUser`
 
@@ -75,6 +77,22 @@ spec:
 | `superuser` | **nicht verwaltbar** – die Angabe ist ein Validierungsfehler |
 
 Nicht angegebene Felder werden nicht verwaltet, also auch nicht zurückgesetzt.
+
+### Privilegierte Rechte (`allowPrivilegedGrants`)
+
+Ohne Operator Policy `allowPrivilegedGrants: true` wird eine Rolle bzw. ein Benutzer `BLOCKED`
+(im `apply` Exit-Code 11), wenn die Deklaration eines der folgenden Rechte vergibt:
+
+- `createrole: true`,
+- `memberOf` einer vordefinierten Rolle `pg_*` (z. B. `pg_execute_server_program`,
+  `pg_read_server_files`, `pg_write_server_files`, `pg_read_all_data`),
+- `memberOf` einer Rolle, die selbst oder über ihre eigenen Mitgliedschaften (transitiv)
+  `SUPERUSER`, `CREATEROLE`, `REPLICATION` oder `BYPASSRLS` hat oder in einer `pg_*`-Rolle ist.
+
+**Immer** `BLOCKED`, auch mit Freigabe: `memberOf`, das (transitiv) die Rolle der Ordivus-Anmeldung
+(`endpoint.user`) oder den Bootstrap-Superuser (OID 10, meist `postgres`) vergibt. Geprüft wird gegen
+den Live-Zustand der Rollen beim Lauf; eine noch nicht existierende Elternrolle wird bei ihrer eigenen
+Deklaration geprüft.
 
 `spec.name` ist nötig, wenn mehrere Targets gleichnamige Rollen haben, denn `metadata.name` muss je
 Kind über die ganze Konfiguration eindeutig sein.
@@ -153,6 +171,8 @@ Semantik:
 - `DELETE` eines Grants entzieht `ALL PRIVILEGES` auf dem Objekt.
 - Nicht unterstützt: `ALL`, `WITH GRANT OPTION`, Grants an `PUBLIC`, Spalten-, Sequenz-, Funktions-
   und Einzeltabellen-Grants, Default Privileges.
+- Grants auf Systemschemas (`pg_catalog`, `information_schema`, alle `pg_*`) sind ein
+  Validierungsfehler: Die Discovery sieht diese Schemas nicht, solche Grants wären unsichtbar.
 
 ## Discovery und Scope
 
@@ -177,6 +197,8 @@ Nie gelöscht oder geändert, nicht deklarierte werden als `IGNORE` gezählt:
 
 - Rollen mit Präfix `pg_` und der Bootstrap-Superuser (OID 10, meist `postgres`),
 - die Datenbanken `postgres`, `template0`, `template1`,
+- Rollen, deren Mitglied die Ordivus-Anmeldung (transitiv) ist, samt der Grants an sie und an die
+  Anmeldung selbst: Entzug oder Löschen würde Ordivus aussperren,
 - Grants an diese Rollen und die impliziten Rechte des Objekteigentümers.
 
 Nicht verwaltbar (`manageable: false`, nie gelöscht, Änderungen `BLOCKED`): Superuser-Rollen und die

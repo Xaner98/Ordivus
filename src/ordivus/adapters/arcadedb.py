@@ -21,6 +21,7 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from ordivus import net
 from ordivus.adapters.base import (
     COMPLETE,
     CREATE,
@@ -40,6 +41,8 @@ from ordivus.adapters.base import (
 
 DB_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,127}")
 ROOT = "root"
+PRIVILEGED_GROUPS = frozenset({"admin"})  # admin: Schema, Benutzerrechte und Konfiguration der Datenbank
+HOST_FORBIDDEN = frozenset("/@?#")
 TIMEOUT = 30
 
 
@@ -77,11 +80,11 @@ def _call(base, context, auth, method, path, body=None, query=None):
         "Authorization": auth, "Content-Type": "application/json", "Accept": "application/json"})
     where = f"{method} {path}"
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT, context=context) as response:
-            return response.status, json.loads(response.read() or b"null")
+        with net.urlopen(request, TIMEOUT, context) as response:
+            return response.status, json.loads(net.read(response) or b"null")
     except urllib.error.HTTPError as e:
         try:
-            payload = json.loads(e.read() or b"null")
+            payload = json.loads(net.read(e) or b"null")
         except ValueError:
             payload = None
         return e.code, payload
@@ -135,7 +138,25 @@ class ArcadeDBAdapter(Adapter):
                 isinstance(db, str) and db and isinstance(g, list) and all(isinstance(x, str) and x for x in g)
                 for db, g in databases.items()):
             errors.append("spec.databases must map database names to lists of group names")
+        elif "*" in databases:  # gälte auch für jede künftige Datenbank, außerhalb jedes Scopes
+            errors.append("spec.databases: '*' (all databases) is not supported, list the databases explicitly")
         return errors
+
+    def validate_target(self, target, resources):
+        return [f"DatabaseUser {r.id!r}: database {db!r} is outside spec.scope.databases"
+                for r in resources if r.kind == "DatabaseUser"
+                for db in r.attrs.get("databases", {}) if not _in_scope(target.get("scope"), "databases", db)]
+
+    def check(self, session, resource, allow_privileged=False):
+        if resource.kind != "DatabaseUser":
+            return None
+        if resource.id in (ROOT, session.username):  # auch wenn außerhalb des Scopes und daher nie entdeckt
+            return f"user {resource.id!r} is protected (root or the Ordivus login)"
+        privileged = sorted({g for groups in resource.attrs.get("databases", {}).values() for g in groups}
+                            & PRIVILEGED_GROUPS)
+        if privileged and not allow_privileged:
+            return f"privileged group(s) {privileged} not permitted by operator policy allowPrivilegedGrants"
+        return None
 
     @staticmethod
     def _validate_target(spec):
@@ -144,8 +165,9 @@ class ArcadeDBAdapter(Adapter):
         if not isinstance(endpoint, dict):
             return [*errors, "spec.endpoint must be a mapping"]
         errors += [f"unknown field spec.endpoint.{k}" for k in endpoint if k not in ("host", "port", "tls")]
-        if not isinstance(endpoint.get("host"), str) or not endpoint.get("host"):
-            errors.append("spec.endpoint.host must be a non-empty string")
+        host = endpoint.get("host")
+        if not isinstance(host, str) or not host or HOST_FORBIDDEN & set(host) or any(c.isspace() for c in host):
+            errors.append("spec.endpoint.host must be a host name or address (no '/', '@', '?', '#', whitespace)")
         if type(endpoint.get("port", 2480)) is not int or not 0 < endpoint.get("port", 2480) < 65536:
             errors.append("spec.endpoint.port must be an integer 1-65535")
         tls = endpoint.get("tls", {})
@@ -221,6 +243,8 @@ class ArcadeDBAdapter(Adapter):
                 if (op.id in names) != (op.action == CREATE):
                     raise
             return
+        if op.id in (ROOT, session.username):  # zweite Sperre neben check()
+            raise PermanentError(f"user {op.id!r} is protected")
         users, name = "/api/v1/server/users", {"name": op.id}
         if op.action == CREATE:
             if op.password is None:

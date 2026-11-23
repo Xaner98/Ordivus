@@ -1,0 +1,55 @@
+{{- if and .Values.admission.enabled .Values.jobs.templates.apply.enabled }}
+{{- $ns := include "ordivus.applyNamespace" . }}
+{{- $name := printf "%s.%s.apply.ordivus.dev" .Release.Name $ns }}
+{{- /* Erwartete Werte aus der gerenderten Apply-Vorlage; resources entfällt (API-Server normalisiert Quantities). */}}
+{{- $tpl := (include "ordivus.cronJob" (dict "root" . "name" "apply" "mode" "apply" "t" .Values.jobs.templates.apply "suspend" true) | fromYaml).spec.jobTemplate.spec.template }}
+{{- $spec := $tpl.spec }}
+{{- $c := omit (index $spec.containers 0) "resources" }}
+{{- $labels := list }}
+{{- range $k, $x := $tpl.metadata.labels }}{{ $labels = append $labels (printf "object.metadata.labels[%s] == %s" (toJson $k) (toJson $x)) }}{{ end }}
+# Pods mit dem Apply-ServiceAccount im Apply-Namespace nur, wenn sie der gerenderten Apply-Vorlage entsprechen
+# und von einem Job "<release>-apply-*" stammen. Grenzen: docs/kubernetes.md.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "ordivus.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [""], apiVersions: [v1], operations: [CREATE], resources: [pods]}
+      - {apiGroups: [""], apiVersions: [v1], operations: [UPDATE], resources: [pods/ephemeralcontainers]}
+  matchConditions:
+    - name: apply-service-account
+      expression: {{ printf "has(object.spec.serviceAccountName) && object.spec.serviceAccountName == %s" (toJson $spec.serviceAccountName) | toJson }}
+  validations:
+    - expression: {{ printf "has(object.metadata.labels) && %s" ($labels | join " && ") | toJson }}
+      message: pods using the apply ServiceAccount must carry the apply template labels
+    - expression: {{ printf "has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(o, has(o.controller) && o.controller && o.apiVersion == 'batch/v1' && o.kind == 'Job' && o.name.startsWith(%s))" (toJson (printf "%s-apply-" .Release.Name)) | toJson }}
+      message: pods using the apply ServiceAccount must be controlled by a Job created from the apply CronJob
+    - expression: {{ list
+        "object.spec.containers.size() == 1 && !has(object.spec.initContainers) && !has(object.spec.ephemeralContainers)"
+        "!has(object.spec.containers[0].command) && !has(object.spec.containers[0].envFrom)"
+        (ternary "true" "!has(object.spec.containers[0].env)" (hasKey $c "env"))
+        (include "ordivus.celMatch" (dict "path" "object.spec.containers[0]" "value" $c))
+        (include "ordivus.celMatch" (dict "path" "object.spec" "value" (dict "volumes" $spec.volumes)))
+        "!(has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken)"
+        "!(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)"
+        | join " && " | toJson }}
+      message: pods using the apply ServiceAccount must match the apply CronJob pod template
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "ordivus.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name | quote }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: {kubernetes.io/metadata.name: {{ $ns | quote }}}
+{{- end }}

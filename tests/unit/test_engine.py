@@ -288,7 +288,7 @@ def test_declared_protected_or_unmanageable_is_blocked(cfg, fake):
 
 
 def test_check_hook_blocks_in_plan(cfg, fake, monkeypatch):
-    monkeypatch.setattr(fake, "check", lambda self, session, r: "reserved name" if r.id == "a" else None)
+    monkeypatch.setattr(fake, "check", lambda self, session, r, allowed: "reserved name" if r.id == "a" else None)
     path = cfg(doc("FakeItem", "a", targetRef="t1"), doc("FakeItem", "b", targetRef="t1"))
     op = run(path, "plan")["operations"][0]
     assert (op["action"], op["reason"]) == ("BLOCKED", "reserved name")

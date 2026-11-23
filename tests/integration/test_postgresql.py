@@ -288,6 +288,13 @@ def test_validation_without_connection():
     assert errors("Grant", grantee="g", database="d", on="schema", schema="s", privileges=["SELECT"]) \
         == ["spec.privileges: 'SELECT' is not one of ['CREATE', 'USAGE']"]
     assert errors("Grant", grantee="g", database="d", on="database", privileges=["temp"]) == []
+    for schema in ("pg_catalog", "information_schema", "pg_toast"):  # unsichtbar für die Discovery
+        assert errors("Grant", grantee="g", database="d", on="tables-in-schema", schema=schema,
+                      privileges=["SELECT"]) == [f"spec.schema {schema!r} is a system schema; grants on it are "
+                                                 "not supported"]
+    tls = {mode: adapter.insecure_transport({"endpoint": {"tls": {"mode": mode}}}) for mode in ("verify-ca",
+                                                                                              "verify-full")}
+    assert tls == {"verify-ca": True, "verify-full": False}  # verify-ca prüft den Hostnamen nicht
 
 
 def test_member_before_parent_converges_in_one_apply(pg):
@@ -304,3 +311,47 @@ def test_role_and_user_with_same_name_is_config_error(pg):
     with pytest.raises(config.ConfigError, match="both DatabaseRole and DatabaseUser"):
         run(path, "plan")
     assert main(["plan", "-f", str(path)]) == 12
+
+
+def test_privileged_membership_is_blocked_unless_policy_allows(pg):
+    p = pg.p
+    pg.sql("CREATE ROLE {} NOLOGIN SUPERUSER", p + "su")
+    pg.sql("CREATE ROLE {} NOLOGIN", p + "mid")
+    pg.sql("GRANT {} TO {}", p + "su", p + "mid")  # transitiv: mid bringt Superuser mit
+    pg.sql("CREATE ROLE {} NOLOGIN CREATEROLE", p + "cr")
+    users = {"bootstrap": ["postgres"], "server_program": ["pg_execute_server_program"], "via_mid": [p + "mid"],
+             "creator": [p + "cr"], "plain": []}
+    docs = [doc("DatabaseUser", k, name=p + k, memberOf=v) for k, v in users.items()]
+    docs.append(doc("DatabaseRole", "attr", name=p + "attr", createrole=True))
+
+    def blocked(rep):
+        return {o["id"] for o in rep["operations"] if o["action"] == "BLOCKED"}
+
+    path = pg.cfg(*docs)
+    rep = run(path, "apply")
+    assert blocked(rep) == {p + k for k in ("bootstrap", "server_program", "via_mid", "creator", "attr")}
+    assert report.exit_code(rep) == 11
+    assert pg.objects() == sorted(p + n for n in ("cr", "mid", "plain", "su"))  # nichts Privilegiertes angelegt
+
+    allowed = run(path, "apply", allowPrivilegedGrants=True)
+    assert blocked(allowed) == {p + "bootstrap"}  # Bootstrap-Superuser bleibt auch mit Freigabe gesperrt
+    assert pg.admin.execute("SELECT count(*) FROM pg_roles WHERE rolname = %s", (p + "bootstrap",)).fetchone() == (0,)
+
+
+def test_roles_of_the_admin_login_are_system(pg):
+    p = pg.p
+    (pg.secrets / "adm").write_text("adm-secret-1234")
+    pg.sql("CREATE ROLE {} NOLOGIN", p + "grp")
+    pg.sql("CREATE ROLE {} NOLOGIN", p + "outer")
+    pg.sql("GRANT {} TO {}", p + "outer", p + "grp")
+    pg.sql("CREATE ROLE {} LOGIN CREATEROLE PASSWORD 'adm-secret-1234'", p + "adm")
+    pg.sql("GRANT {} TO {}", p + "grp", p + "adm")  # adm ist (transitiv) Mitglied von grp und outer
+    pg.sql("CREATE ROLE {} NOLOGIN", p + "other")
+    policy = doc("ReconciliationPolicy", "gov", targetRef="pg", mode="authoritative",
+                 scope={"resourceKinds": ["DatabaseRole"]})
+    path = pg.cfg(doc("Credential", "adm", providerRef="files", path="adm"), policy,
+                  doc("DatabaseRole", "g", name=p + "grp", memberOf=[]), user=p + "adm", cred="adm")
+    rep = run(path, "plan", allowAuthoritative=True, allowDelete=True)
+    ops = {o["id"]: o["action"] for o in rep["operations"] if o["kind"] == "DatabaseRole"}
+    assert ops == {p + "grp": "BLOCKED", p + "other": "DELETE"}  # outer: IGNORE (nicht im Report)
+    assert report.exit_code(rep) == 0

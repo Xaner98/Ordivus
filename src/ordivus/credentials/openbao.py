@@ -26,6 +26,10 @@ def _str(value) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def _segments_ok(path: str) -> bool:
+    return not any(part in ("", ".", "..") for part in path.strip("/").split("/"))
+
+
 class OpenBaoKV2Provider(CredentialProvider):
     type = "openbao-kv-v2"
 
@@ -45,6 +49,8 @@ class OpenBaoKV2Provider(CredentialProvider):
         for key in ("mount", "namespace"):
             if key in spec and not _str(spec[key]):
                 errors.append(f"spec.{key} must be a non-empty string")
+        if _str(spec.get("mount")) and not _segments_ok(spec["mount"]):
+            errors.append("spec.mount must not contain empty, '.' or '..' segments")
         tls = spec.get("tls", {})
         if not isinstance(tls, dict) or set(tls) - {"caFile"} or not all(_str(v) for v in tls.values()):
             errors.append("spec.tls must be a mapping with optional string caFile")
@@ -93,10 +99,13 @@ class OpenBaoKV2Provider(CredentialProvider):
             raise CredentialError(f"openbao login ({auth['method']}): no client token in response") from None
         return self._token
 
+    def _mount(self) -> str:
+        return quote(self.spec.get("mount", "secret").strip("/"))
+
     def _path(self, ref, kind):
-        if any(part in ("", ".", "..") for part in ref["path"].strip("/").split("/")):
+        if not _segments_ok(ref["path"]):
             raise CredentialError(f"credential path {ref['path']!r} must not contain empty, '.' or '..' segments")
-        return f"{quote(self.spec.get('mount', 'secret'))}/{kind}/{quote(ref['path'].strip('/'))}"
+        return f"{self._mount()}/{kind}/{quote(ref['path'].strip('/'))}"
 
     # --- Vertrag ---------------------------------------------------------------------------------
 
@@ -111,6 +120,12 @@ class OpenBaoKV2Provider(CredentialProvider):
             return State(CONFLICT, "current version deleted or destroyed; restore or remove the path manually")
         if status != 404:  # 403, 5xx, alles andere: kein Beweis für "fehlt"
             return State(UNKNOWN, f"metadata read returned HTTP {status}")
+        # Auf einem KV-v1-Mount ist ".../metadata/<pfad>" nur ein weiterer fehlender Schlüssel: Version prüfen
+        status, body = self._call("GET", f"sys/internal/ui/mounts/{self._mount()}")
+        mount = body.get("data") or {}
+        if status != 200 or mount.get("type") != "kv" or str((mount.get("options") or {}).get("version")) != "2":
+            return State(UNKNOWN, f"mount {self.spec.get('mount', 'secret')!r} is not verifiably a KV v2 mount "
+                                  f"(HTTP {status})")
         paths = [self._path(ref, "metadata"), self._path(ref, "data")]
         status, body = self._call("POST", "sys/capabilities-self", {"paths": paths})
         caps = body.get("data") or body

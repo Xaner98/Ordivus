@@ -28,7 +28,8 @@ Ordivus liest YAML mit der Semantik des **YAML-1.2-Core-Schemas**:
 - `no`, `yes`, `on`, `off`, `y`, `n` bleiben Zeichenketten (in YAML 1.1 wären es Booleans). Ein Benutzer namens `no` bleibt also `no`.
 - Nur `true`/`false` sind Booleans, nur `null`/`~`/leer ist null.
 - `0777` ist die Zahl 777, Oktal schreibt man `0o777`. Datumsangaben und Werte wie `1:30` bleiben Zeichenketten.
-- **Anker und Aliase (`&`, `*`) sind nicht erlaubt**, doppelte Schlüssel ebenfalls. Maximale Dateigröße: 1 MiB.
+- **Anker und Aliase (`&`, `*`) sind nicht erlaubt**, doppelte Schlüssel ebenfalls. Maximale Dateigröße: 1 MiB; gelesen werden nur reguläre Dateien.
+- Nur JSON-kompatible Werte: Schlüssel müssen Zeichenketten sein; Tags wie `!!timestamp`, `!!set`, `!!binary`, `!!omap` oder `!!pairs` sind Konfigurationsfehler (Exit-Code 12) mit Datei und Zeile, ebenso zu tief verschachtelte Strukturen.
 
 ## Kinds der Engine
 
@@ -59,7 +60,7 @@ spec:
 
 | `type` | Zweck |
 |---|---|
-| `file` | Eine Datei je Secret in `directory`. Passt zu gemounteten Kubernetes Secrets und zu Dateien, die eine CI-Pipeline bereitstellt. Neue Secrets werden mit Rechten `0600` angelegt. |
+| `file` | Eine Datei je Secret in `directory`. Passt zu gemounteten Kubernetes Secrets und zu Dateien, die eine CI-Pipeline bereitstellt. Neue Secrets werden atomar (Temp-Datei, `fsync`, dann unter dem Zielnamen verlinkt) mit Rechten `0600` angelegt. Symlinks werden nur gefolgt, wenn sie auf eine reguläre Datei zeigen; ein kaputter Symlink oder eine Sonderdatei gilt als `unknown`, nie als fehlend. |
 | `openbao-kv-v2` | OpenBao (oder Vault-kompatibel) KV v2, siehe [credentials/openbao.md](credentials/openbao.md). |
 | `env` | Umgebungsvariablen, **nur im Profil `development`**, nur lesend. |
 
@@ -74,7 +75,7 @@ spec:
   path: reporting-password        # file: Dateiname; openbao: KV-Pfad; env: Variablenname
   lifecycle:
     generator:                    # optional, nur für neu erzeugte Passwörter
-      length: 40                  # mindestens 16, Standard 32
+      length: 40                  # 16 bis 1024, Standard 32
       alphabet: alphanumeric      # oder alphanumeric-symbol-safe
 ```
 
@@ -134,11 +135,14 @@ allowTargets: ["*"]          # oder Liste von Target-Namen
 allowAuthoritative: false
 allowDelete: false
 allowPasswordReset: true
+allowPrivilegedGrants: false # true: privilegierte Rechte (Superuser-Rollen, Benutzerverwaltung …) erlauben
 profile: standard            # standard | development
 requireTls: false            # true: Targets ohne TLS bzw. ohne Zertifikatsprüfung verweigern
 ```
 
-`requireTls`: Was als unsicher gilt, legt der Adapter fest (Klartext, TLS aus, keine Zertifikatsprüfung; bei PostgreSQL alles außer `verify-ca`/`verify-full`). Mit `true` bricht der Lauf vor der ersten Verbindung mit Exit-Code 11 ab; mit `false` gibt es eine Warnung auf stderr und `"insecureTransport": true` am Target im Report.
+`allowPrivilegedGrants`: Die Konfiguration darf nicht mehr Rechte vergeben, als der Operator erlaubt. Ohne diese Freigabe werden deklarierte Ressourcen, die privilegierte Rechte vergeben würden, `BLOCKED` (bei `apply` Exit-Code 11; die übrigen Operationen laufen). Was als privilegiert gilt, legt jeder Adapter fest (z. B. Mitgliedschaft in Superuser- oder `pg_*`-Rollen, `CREATE USER`, `SUPER`, `ACCESS MANAGEMENT`, `+@admin`, Gruppe `admin`); die Listen stehen in der jeweiligen [Adapter-Dokumentation](adapters/). Geschützte Systemobjekte, das eigene Admin-Login und dessen Rollen bleiben auch mit `true` unantastbar.
+
+`requireTls`: Was als unsicher gilt, legt der Adapter fest (Klartext, TLS aus, keine Zertifikats- oder Hostnamenprüfung; bei PostgreSQL und MySQL alles außer `verify-full`). Mit `true` bricht der Lauf vor der ersten Verbindung mit Exit-Code 11 ab; mit `false` gibt es eine Warnung auf stderr und `"insecureTransport": true` am Target im Report.
 
 Ohne `--policy` gelten genau diese Werte. Eine angegebene, aber fehlende oder fehlerhafte Policy-Datei bricht den Lauf ab (Exit-Code 11).
 
@@ -152,11 +156,13 @@ Ohne `--policy` gelten genau diese Werte. Eine angegebene, aber fehlende oder fe
 | 10 | Drift-/Änderungsschwelle überschritten (`--fail-on`) |
 | 11 | Policy-Verstoß oder nicht erlaubte Operation; bei `apply` auch jede `BLOCKED`-Operation (die übrigen laufen trotzdem) |
 | 12 | Konfigurationsfehler |
-| 13 | Zielsystem, Credential oder Netzwerk nicht verfügbar |
-| 14 | Teilweise ausgeführt oder nach `apply` nicht bestätigt – bitte prüfen |
+| 13 | Zielsystem, Credential oder Netzwerk nicht verfügbar; bei `apply` auch, wenn eine deklarierte Ressource nicht geprüft werden konnte (Target-Status `incomplete`) |
+| 14 | Teilweise ausgeführt oder nach `apply` nicht bestätigt – bitte prüfen (auch: Target nach ersten Änderungen abgebrochen, Status `partial`) |
 | 130 / 143 | Abgebrochen (SIGINT / SIGTERM) |
 
-Schwellen: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable|unmanaged|any`. Ohne `--fail-on` enden `plan` und `drift` mit 0, auch wenn Abweichungen gefunden wurden.
+Schwellen: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable|unmanaged|unknown|any`. `unknown` schlägt an, sobald etwas nicht feststellbar war (`UNKNOWN`-Operationen oder Target-Status `incomplete`); `any` schließt das ein. Ohne `--fail-on` enden `plan` und `drift` mit 0, auch wenn Abweichungen gefunden wurden.
+
+Target-Status im Report: `in_sync`, `drift_detected`, `incomplete` (Inventar unvollständig oder eine deklarierte Ressource bzw. ihr Passwort nicht prüfbar), bei `apply` außerdem `applied`, `partial` und `error`. Ein `apply` meldet nie `in_sync`, solange eine deklarierte Ressource `UNKNOWN` ist. Ein unerwarteter Fehler (z. B. ein Adapter-Bug) macht nur dieses Target zum Fehler; die übrigen Targets laufen weiter. Auf stderr erscheint dann nur der Fehlertyp; einen Traceback gibt es nur mit `ORDIVUS_DEBUG=1` (kann Secrets enthalten, nur zur Fehlersuche).
 
 ## Report
 
@@ -166,6 +172,6 @@ Schwellen: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable
 ordivus drift -f ./config --format json | grep '"type": *"report"' > report.json
 ```
 
-Operationen an nicht veränderbaren oder geschützten Objekten tragen `"manageable": false` bzw. `"system": true`. Passwörter erscheinen nur als `CREATE_SECRET` und `SET_PASSWORD` (Wert immer `<redacted>`), nie unter den Änderungen eines `CREATE`. Kann ein Credential Provider den Zustand eines Secrets nicht bestimmen, steht der Grund als `reason` an der Credential-Operation (`UNKNOWN`, bzw. `BLOCKED`, wenn nur ein manueller Eingriff hilft).
+Operationen an nicht veränderbaren oder geschützten Objekten tragen `"manageable": false` bzw. `"system": true`. Passwörter erscheinen nur als `CREATE_SECRET` und `SET_PASSWORD` (Wert immer `<redacted>`), nie unter den Änderungen eines `CREATE`. Kann ein Credential Provider den Zustand eines Secrets nicht bestimmen oder ist ein Secret leer, steht der Grund als `reason` an der Credential-Operation (`UNKNOWN`, bzw. `BLOCKED`, wenn nur ein manueller Eingriff hilft); ein leeres Secret wird nie als Passwort gesetzt. Alle Texte im Report und in den Logs werden gegen die im Lauf gelesenen Secrets geprüft und ersetzt (`<redacted>`).
 
-Mit `--output DATEI` landet der Report in einer Datei. Ordivus speichert Reports nicht selbst; das Aufzeichnen übernimmt das aufrufende System (CI-Artefakt, Log-Sammlung).
+Mit `--output DATEI` landet der Report in einer Datei (neu angelegt mit Rechten `0600`; ein Symlink als Ziel wird abgelehnt). Ordivus speichert Reports nicht selbst; das Aufzeichnen übernimmt das aufrufende System (CI-Artefakt, Log-Sammlung).

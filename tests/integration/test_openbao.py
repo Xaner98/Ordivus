@@ -247,3 +247,46 @@ def test_read_only_session_refuses_and_missing_list_is_forbidden(tmp_path, uid):
     directory = policy_config(tmp_path, weak)
     rep = engine.run("plan", config.load(directory), OperatorPolicy())
     assert rep["targets"][0]["inventory"]["OpenBaoPolicy"]["status"] == "forbidden"
+
+
+def test_policy_name_variants_cannot_bypass_protection(tmp_path, uid):
+    """OpenBao trimmt und kleinschreibt Namen: Varianten geschützter Namen sind ungültig bzw. geschützt."""
+    a = OpenBaoAdapter()
+    prot = f"rvw-prot-{uid}"
+    bao("PUT", f"sys/policies/acl/{prot}", {"policy": 'path "x" { capabilities = ["read"] }'})
+    original = bao("GET", "sys/policies/acl/default")[1]["data"]["policy"]
+    target = {"endpoint": {"url": URL}, "protectedPolicies": [f" Admin-Ops-{uid} ", prot.upper()]}
+    rules = [{"path": "rvw/*", "capabilities": ["read"]}]
+    with a.connect(target, Secret(ROOT), write=True) as session:
+        for name in ["default ", " default", "default\t", "default\n", f"{prot} ", "Default", "ｄefault",
+                     "rvw q", "-x"]:
+            d = {"kind": "OpenBaoPolicy", "metadata": {"name": "p"}, "spec": {"policyName": name, "rules": rules}}
+            assert a.validate(d), name  # ungültiger Name: Config-Fehler, nie angewendet
+        for name in ["default", prot, f"admin-ops-{uid}"]:  # Normalform geschützter Namen
+            r = a.desired({"kind": "OpenBaoPolicy", "metadata": {"name": "p"},
+                           "spec": {"policyName": name, "rules": rules}})
+            assert a.check(session, r) and "protected" in a.check(session, r)
+            with pytest.raises(PermanentError, match="protected"):
+                a.apply(session, Op("bao", "OpenBaoPolicy", name, CREATE, desired=r))
+        found = {r.id: r for r in a.discover(session, "OpenBaoPolicy", None).resources}
+        assert found[prot].system and found["default"].system
+    assert bao("GET", "sys/policies/acl/default")[1]["data"]["policy"] == original
+    assert bao("GET", f"sys/policies/acl/admin-ops-{uid}")[0] == 404
+    bao("DELETE", f"sys/policies/acl/{prot}")
+
+
+def test_kv_v1_mount_is_unknown_never_absent(tmp_path, uid):
+    mount = f"kv1-{uid}"
+    assert bao("POST", f"sys/mounts/{mount}", {"type": "kv", "options": {"version": "1"}})[0] == 204
+    try:
+        file = tmp_path / "token"
+        file.write_text(ROOT)
+        p = PROVIDERS["openbao-kv-v2"]({"type": "openbao-kv-v2", "endpoint": URL, "mount": mount,
+                                        "auth": {"method": "token", "tokenFile": str(file)}})
+        state = p.state({"path": f"app/{uid}"})
+        assert state == UNKNOWN and "KV v2" in state.reason
+    finally:
+        bao("DELETE", f"sys/mounts/{mount}")
+    # gewöhnliches Token mit Leserecht auf dem KV-v2-Pfad: weiterhin absent
+    reader = token_with(f"it-kv2-{uid}", f'path "secret/+/it/{uid}/*" {{ capabilities = ["read"] }}')
+    assert provider(tmp_path, reader).state({"path": f"it/{uid}/x"}) == ABSENT

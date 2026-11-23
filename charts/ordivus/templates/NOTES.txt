@@ -1,6 +1,7 @@
 Ordivus job templates installed (suspended CronJobs, nothing runs automatically):
 {{- range $mode := list "plan" "drift" "apply" }}{{ if (index $.Values.jobs.templates $mode).enabled }}
-  cronjob/{{ $.Release.Name }}-{{ $mode }}{{ end }}{{ end }}
+  {{ ternary (include "ordivus.applyNamespace" $) $.Release.Namespace (eq $mode "apply") }}/cronjob/{{ $.Release.Name }}-{{ $mode }}{{ end }}{{ end }}
 
 Start a run without a Helm upgrade:
   scripts/run-job.sh plan {{ .Release.Namespace }} {{ .Release.Name }}
+  ORDIVUS_KUBE_CONTEXT=<context> scripts/run-job.sh apply {{ include "ordivus.applyNamespace" . }} {{ .Release.Name }}

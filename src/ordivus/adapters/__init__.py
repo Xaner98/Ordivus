@@ -11,7 +11,7 @@ _loaded = False
 
 
 def register(adapter_cls: type[Adapter]) -> Adapter:
-    """Registriert eine Adapter-Klasse (Entry Points oder Tests); gleiche ID überschreibt."""
+    """Registriert eine Adapter-Klasse (Tests); gleiche ID überschreibt. Entry Points nutzen ``_load``."""
     _registry[adapter_cls.id] = adapter_cls()
     return _registry[adapter_cls.id]
 
@@ -21,9 +21,15 @@ def _load() -> None:
     if _loaded:
         return
     _loaded = True
-    for ep in entry_points(group="ordivus.adapters"):
+    # Eingebaute zuerst: ein Plugin mit derselben ID ersetzt nie einen eingebauten Adapter
+    for ep in sorted(entry_points(group="ordivus.adapters"), key=lambda ep: not ep.value.startswith("ordivus.")):
         try:
-            register(ep.load())
+            cls = ep.load()
+            if cls.id in _registry:
+                if type(_registry[cls.id]) is not cls:
+                    log.warning("adapter %r from entry point %r ignored: id already registered", cls.id, ep.value)
+                continue
+            register(cls)
         except Exception as e:  # defektes Plugin darf andere Adapter nicht blockieren
             log.warning("cannot load adapter %r: %s: %s", ep.name, type(e).__name__, e)
 

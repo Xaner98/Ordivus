@@ -11,7 +11,7 @@ import fnmatch
 import re
 import ssl
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from ordivus.adapters.base import (
     COMPLETE,
@@ -40,6 +40,10 @@ CHARSET_RE = re.compile(r"[a-z0-9_]+")
 COLUMN_PRIVS = {"Create_tmp_table": "CREATE TEMPORARY TABLES", "Repl_slave": "REPLICATION SLAVE",
                 "Repl_client": "REPLICATION CLIENT", "Show_db": "SHOW DATABASES", "Grant": "GRANT OPTION"}
 LOCK_TIMEOUT = 10
+# INV-10: nur mit Operator-Policy allowPrivilegedGrants (zusätzlich: jedes on: global und alles auf *_ADMIN)
+PRIVILEGED = frozenset({"SUPER", "CREATE USER", "SYSTEM_USER", "FILE", "PROXY", "SHUTDOWN", "PROCESS", "RELOAD",
+                        "GRANT OPTION", "CREATE ROLE", "DROP ROLE", "REPLICATION SLAVE", "REPLICATION CLIENT",
+                        "CREATE TABLESPACE", "SHOW DATABASES"})
 
 
 def quote_ident(name: str) -> str:
@@ -103,6 +107,13 @@ class MySQLSession:
     conn: object
     write: bool
     current: str  # eigenes Konto, wird nie verändert oder gelöscht
+    scope: dict | None = None
+    cache: dict = field(default_factory=dict)  # Lookups für check/discover, gilt nur für diese Session
+
+
+def _privileged(attrs: dict) -> list[str]:
+    privs = [p for p in attrs["privileges"] if p in PRIVILEGED or p.endswith("_ADMIN")]
+    return ["on: global", *privs] if attrs["on"] == "global" else privs
 
 
 def _connect_args(endpoint: dict) -> dict:
@@ -225,6 +236,8 @@ class MySQLAdapter(Adapter):
                 errors += self._name_errors(spec.get(key), f"spec.{key}", 64)
             elif key in spec:
                 errors.append(f"spec.{key} is not allowed with on: {level}")
+        if isinstance(spec.get("database"), str) and spec["database"].lower() in SYSTEM_DATABASES:
+            errors.append(f"grants on system database {spec['database']!r} are not supported")  # mysql.* = root
         privs = spec.get("privileges")
         if not isinstance(privs, list) or not privs or not all(isinstance(p, str) for p in privs):
             return [*errors, "spec.privileges must be a non-empty list of strings"]
@@ -262,7 +275,71 @@ class MySQLAdapter(Adapter):
         return [(kind, role) for role in resource.attrs.get("roles", []) for kind in ("DatabaseRole", "DatabaseUser")]
 
     def insecure_transport(self, target):
-        return (target["endpoint"].get("tls") or {}).get("mode", "verify-full") in ("disable", "require")
+        # verify-ca prüft den Hostnamen nicht: jedes Zertifikat der CA passt, daher nur verify-full sicher
+        return (target["endpoint"].get("tls") or {}).get("mode", "verify-full") != "verify-full"
+
+    # --- Planungsprüfung (INV-10) -----------------------------------------------------------------
+
+    def check(self, session, resource, allow_privileged=False):
+        if resource.kind in ("DatabaseUser", "DatabaseRole") and account(resource.id)[0] in SYSTEM_USERS:
+            return f"account {resource.id!r} is a system account"
+        if resource.kind == "DatabaseUser":
+            roles = sorted({*resource.attrs.get("roles", []), *resource.attrs.get("defaultRoles", [])})
+            for role in roles:
+                if account(role)[0] in SYSTEM_USERS or role == session.current:
+                    return f"role {role!r} is a system account or the admin login"
+            if allow_privileged:
+                return None
+            accounts, powerful = self._lookup(session)
+            for role in roles:
+                # fehlt die Rolle, legt sie eine deklarierte DatabaseRole an (läuft vorher, siehe dependencies)
+                if role in accounts and not accounts[role]:
+                    return f"role {role!r} is a user account, not a role; granting it requires allowPrivilegedGrants"
+                if self._closure(session, role) & powerful:
+                    return (f"role {role!r} holds global or system-database privileges; granting it requires "
+                            "allowPrivilegedGrants")
+        if resource.kind == "Grant":
+            a = resource.attrs
+            if account(a["grantee"])[0] in SYSTEM_USERS or a["grantee"] == session.current:
+                return f"grantee {a['grantee']!r} is a system account or the admin login"
+            if "database" in a and not self._in(session.scope, "databases", a["database"]):
+                return f"database {a['database']!r} is outside the target scope"
+            if (privileged := _privileged(a)) and not allow_privileged:
+                return f"privileged grant ({', '.join(privileged)}) requires operator policy allowPrivilegedGrants"
+        return None
+
+    def _lookup(self, session):
+        """({konto: ist_rolle}, Konten mit globalen oder Systemdatenbank-Rechten), ungefiltert vom Scope."""
+        if "lookup" not in session.cache:
+            accounts = {_id(n, h): locked == "Y" and expired == "Y" and bool(empty) for n, h, locked, expired, empty
+                        in self._run(session, "SELECT User, Host, account_locked, password_expired, "
+                                              "authentication_string = '' FROM mysql.user")}
+            powerful = {_id(r["User"], r["Host"]) for r in self._dicts(session, "SELECT * FROM mysql.user")
+                        if any(c.endswith("_priv") and v == "Y" for c, v in r.items())}
+            powerful |= {_id(u, h) for u, h in self._run(session, "SELECT USER, HOST FROM mysql.global_grants")}
+            powerful |= {_id(u, h) for u, h, db in self._run(session, "SELECT User, Host, Db FROM mysql.db")
+                         if _db_pattern(db)[0].lower() in SYSTEM_DATABASES}
+            session.cache["lookup"] = accounts, powerful
+        return session.cache["lookup"]
+
+    def _closure(self, session, rid: str) -> set[str]:
+        """``rid`` und alle Rollen, die es (transitiv über mysql.role_edges) hält."""
+        if "edges" not in session.cache:
+            edges: dict[str, set] = {}
+            for fu, fh, tu, th in self._run(session, "SELECT FROM_USER, FROM_HOST, TO_USER, TO_HOST "
+                                                      "FROM mysql.role_edges"):
+                edges.setdefault(_id(tu, th), set()).add(_id(fu, fh))
+            session.cache["edges"] = edges
+        seen, todo = set(), [rid]
+        while todo:
+            if (r := todo.pop()) not in seen:
+                seen.add(r)
+                todo += session.cache["edges"].get(r, ())
+        return seen
+
+    def _admin_roles(self, session) -> set[str]:
+        """Rollen des eigenen Logins: nie entziehen oder löschen (Selbstaussperrung)."""
+        return self._closure(session, session.current) - {session.current}
 
     # --- Verbindung -----------------------------------------------------------------------------
 
@@ -280,7 +357,7 @@ class MySQLAdapter(Adapter):
         except OSError as e:
             raise TransientError(f"connect to {endpoint['host']} failed: {type(e).__name__}") from None
         try:
-            session = MySQLSession(conn, write, "")
+            session = MySQLSession(conn, write, "", target.get("scope"))
             if not write:  # zweite Schicht: MySQL 8.4 weist dann auch CREATE USER ab (1792)
                 self._run(session, "SET SESSION TRANSACTION READ ONLY")
             session.current = self._run(session, "SELECT CURRENT_USER()")[0][0]
@@ -350,13 +427,14 @@ class MySQLAdapter(Adapter):
             for h, u, rh, ru in self._run(session, "SELECT HOST, USER, DEFAULT_ROLE_HOST, DEFAULT_ROLE_USER "
                                                     "FROM mysql.default_roles"):
                 defaults.setdefault(_id(u, h), []).append(_id(ru, rh))
-        found = []
+        found, admin_roles = [], self._admin_roles(session)
         for rid, (name, is_role, locked) in sorted(accounts.items()):
             if is_role != want_role:
                 continue
             attrs = {} if want_role else {"roles": sorted(edges.get(rid, [])),
                                           "defaultRoles": sorted(defaults.get(rid, [])), "accountLocked": locked}
-            found.append(Resource(kind, rid, attrs, system=name in SYSTEM_USERS, manageable=rid != session.current))
+            found.append(Resource(kind, rid, attrs, system=name in SYSTEM_USERS or rid in admin_roles,
+                                  manageable=rid != session.current))
         return Discovery(COMPLETE, found)
 
     def _grants(self, session, scope, accounts) -> list[Resource]:
@@ -384,9 +462,10 @@ class MySQLAdapter(Adapter):
             privs = privs if isinstance(privs, str) else ",".join(privs)  # SET-Spalte
             names = ["GRANT OPTION" if p == "Grant" else p.upper() for p in privs.split(",") if p]
             add(user, host, "table", names, db, table)
-        out = []
+        out, admin_roles = [], self._admin_roles(session)
         for (gid, level, db, table, wildcard), privs in sorted(by_key.items(), key=lambda kv: str(kv[0])):
-            grant = _grant_resource(gid, level, privs, db, table, system=accounts[gid][0] in SYSTEM_USERS,
+            grant = _grant_resource(gid, level, privs, db, table,
+                                    system=accounts[gid][0] in SYSTEM_USERS or gid in admin_roles,
                                     manageable=gid != session.current and not wildcard)
             # fremder Wildcard-Grant (z. B. app_db als Muster): eigenes, nicht änderbares Objekt, nie "gleich" app_db
             out.append(replace(grant, id=grant.id + " (wildcard pattern)") if wildcard else grant)
@@ -431,6 +510,10 @@ class MySQLAdapter(Adapter):
             return run(f"CREATE ROLE {me}" if op.action == CREATE else f"DROP ROLE {me}")
         if op.kind == "Grant":
             attrs = (op.observed if op.action == DELETE else op.desired).attrs
+            if op.action != DELETE and "database" in attrs and (attrs["database"].lower() in SYSTEM_DATABASES
+                                                                or not self._in(session.scope, "databases",
+                                                                                attrs["database"])):
+                raise PermanentError(f"database {attrs['database']!r} is a system database or outside the scope")
             obj, grantee = _grant_object(attrs, statement=True), acct(attrs["grantee"])
             if op.action == CREATE:
                 return run(f"GRANT {self._privs(attrs['privileges'])} ON {obj} TO {grantee}")
@@ -460,6 +543,9 @@ class MySQLAdapter(Adapter):
             changes = op.changes
             if "accountLocked" in changes:
                 run(f"ALTER USER {me} ACCOUNT {'LOCK' if changes['accountLocked'][1] else 'UNLOCK'}")
+        if any(account(r)[0] in SYSTEM_USERS or r == session.current
+               for r in [*changes.get("roles", ([], []))[1], *changes.get("defaultRoles", ([], []))[1]]):
+            raise PermanentError("refusing to grant a system account or the admin login as role")
         if "roles" in changes:
             old, new = (set(v or []) for v in changes["roles"])
             if new - old:
@@ -479,14 +565,32 @@ class MySQLAdapter(Adapter):
         return ", ".join(privs)
 
     def verify_password(self, session, target, resource, password: Secret):
+        """Echter Login-Versuch. Nie bei Konten mit Login-Sperre (FAILED_LOGIN_ATTEMPTS) oder aktivem
+        connection_control: ein Fehlversuch würde das Konto sperren bzw. verzögern (plan bleibt read-only)."""
         import pymysql
 
         name, host = account(resource.id)
+        lit = session.conn.escape
+        try:
+            locking = self._run(session, "SELECT JSON_EXTRACT(User_attributes, "
+                                         "'$.Password_locking.failed_login_attempts') FROM mysql.user "
+                                         f"WHERE User = {lit(name)} AND Host = {lit(host)}")
+            control = self._run(session, "SELECT 1 FROM information_schema.PLUGINS WHERE PLUGIN_NAME LIKE "
+                                         "'CONNECTION_CONTROL%' AND PLUGIN_STATUS = 'ACTIVE' UNION ALL "
+                                         "SELECT 1 FROM mysql.component "
+                                         "WHERE component_urn LIKE '%connection_control%'")
+            # andere Einträge mit diesem Namen oder anonyme Konten können beim Login greifen: 1045 beweist dann nichts
+            shadows = self._run(session, f"SELECT COUNT(*) FROM mysql.user WHERE User IN ({lit(name)}, '')")[0][0]
+        except (PermanentError, AuthorizationError, TransientError):
+            return None
+        if control or (locking and locking[0][0] not in (None, 0, "0")):
+            return None
         try:
             conn = _open(target["endpoint"], name, password.reveal())
         except pymysql.MySQLError as e:
-            return False if e.args and e.args[0] == 1045 else None
-        except OSError:
+            wrong = e.args and e.args[0] == 1045 and host == "%" and shadows == 1
+            return False if wrong else None
+        except Exception:  # OSError, RuntimeError (cryptography fehlt für caching_sha2) …: nicht prüfbar
             return None
         try:
             with conn.cursor() as cur:

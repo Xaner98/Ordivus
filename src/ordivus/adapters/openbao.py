@@ -31,6 +31,13 @@ from ordivus.adapters.base import (
 KIND = "OpenBaoPolicy"
 SYSTEM_POLICIES = frozenset({"root", "default"})
 CAPABILITY = re.compile(r"^[a-z_]+$")
+# OpenBao trimmt und kleinschreibt Namen serverseitig (" Default" == "default"): nur die Normalform zulassen
+POLICY_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]*")
+
+
+def normalize(name: str) -> str:
+    """Wie OpenBao Policy-Namen speichert: ohne Rand-Leerraum, kleingeschrieben."""
+    return name.strip().lower()
 
 
 def canonical(text: str) -> str:
@@ -80,8 +87,8 @@ class OpenBaoAdapter(Adapter):
             return errors
         errors = [f"unknown field spec.{k}" for k in spec if k not in {"policyName", "rules", "policy"}]
         name = spec.get("policyName")
-        if not isinstance(name, str) or not name or name != name.lower() or "/" in name:
-            errors.append("spec.policyName must be a non-empty lowercase name without '/' (OpenBao lowercases names)")
+        if not isinstance(name, str) or not POLICY_NAME.fullmatch(name):
+            errors.append("spec.policyName must match [a-z0-9][a-z0-9_.-]* (OpenBao trims and lowercases names)")
         if ("rules" in spec) == ("policy" in spec):
             return [*errors, "exactly one of spec.rules or spec.policy is required"]
         if "policy" in spec:
@@ -108,9 +115,9 @@ class OpenBaoAdapter(Adapter):
     def insecure_transport(self, target):
         return target["endpoint"]["url"].startswith("http://")
 
-    def check(self, session, resource):
+    def check(self, session, resource, allow_privileged=False):
         # auch noch nicht existierende geschützte Namen schon im Plan sperren, nicht erst beim Schreiben
-        return f"policy {resource.id!r} is protected" if resource.id in session.protected else None
+        return f"policy {resource.id!r} is protected" if normalize(resource.id) in session.protected else None
 
     @contextmanager
     def connect(self, target, secret, write):
@@ -120,7 +127,7 @@ class OpenBaoAdapter(Adapter):
                           write, frozenset())
         me = session.call("GET", "auth/token/lookup-self", what="token lookup-self").get("data") or {}
         own = set(me.get("policies") or []) | set(me.get("identity_policies") or [])
-        session.protected = SYSTEM_POLICIES | set(target.get("protectedPolicies", [])) | own
+        session.protected = frozenset(map(normalize, SYSTEM_POLICIES | set(target.get("protectedPolicies", [])) | own))
         yield session
 
     def discover(self, session, kind, scope):
@@ -129,13 +136,14 @@ class OpenBaoAdapter(Adapter):
         for name in sorted(names):
             data = session.call("GET", f"sys/policies/acl/{quote(name, safe='')}", what=f"read policy {name!r}")
             resources.append(Resource(KIND, name, {"policy": canonical(data["data"].get("policy") or "")},
-                                      system=name in session.protected))
+                                      system=normalize(name) in session.protected))
         return Discovery(COMPLETE, resources)
 
     def apply(self, session, op: Op):
         if not session.write:
             raise PermanentError("read-only session")
-        if op.id in session.protected:  # zweite Sperre neben system=True, z. B. für noch fehlende geschützte Namen
+        # zweite Sperre neben system=True, z. B. für noch fehlende geschützte Namen
+        if normalize(op.id) in session.protected or not POLICY_NAME.fullmatch(op.id):
             raise PermanentError(f"policy {op.id!r} is protected")
         path = f"sys/policies/acl/{quote(op.id, safe='')}"
         if op.action in (CREATE, UPDATE):

@@ -11,6 +11,9 @@ from ordivus.credentials.base import ABSENT, CONFLICT, PRESENT, UNKNOWN
 REF = {"providerRef": "bao", "path": "app/db"}
 META, DATA = "secret/metadata/app/db", "secret/data/app/db"
 LIVE = {"data": {"current_version": 1, "versions": {"1": {"deletion_time": "", "destroyed": False}}}}
+MOUNT = "sys/internal/ui/mounts/secret"
+CAPS = ("POST", "sys/capabilities-self")
+KV2 = {("GET", MOUNT): (200, {"data": {"type": "kv", "options": {"version": "2"}}})}
 
 
 def provider(tmp_path, responses, calls=None):
@@ -34,15 +37,19 @@ def provider(tmp_path, responses, calls=None):
 
 @pytest.mark.parametrize("responses, expected", [
     ({("GET", META): (200, LIVE)}, PRESENT),
-    ({("GET", META): (404, {}), ("POST", "sys/capabilities-self"): (200, {"data": {META: ["read", "list"],
+    ({**KV2, ("GET", META): (404, {}), ("POST", "sys/capabilities-self"): (200, {"data": {META: ["read", "list"],
                                                                                    DATA: ["create", "read"]}})},
      ABSENT),
-    ({("GET", META): (404, {}), ("POST", "sys/capabilities-self"): (200, {"data": {META: ["root"], DATA: ["root"]}})},
+    ({**KV2, ("GET", META): (404, {}), CAPS: (200, {"data": {META: ["root"], DATA: ["root"]}})},
      ABSENT),
-    ({("GET", META): (404, {}), ("POST", "sys/capabilities-self"): (200, {"data": {META: ["read"], DATA: ["deny"]}})},
+    ({**KV2, ("GET", META): (404, {}), CAPS: (200, {"data": {META: ["read"], DATA: ["deny"]}})},
      UNKNOWN),
-    ({("GET", META): (404, {}), ("POST", "sys/capabilities-self"): (403, {})}, UNKNOWN),
+    ({**KV2, ("GET", META): (404, {}), ("POST", "sys/capabilities-self"): (403, {})}, UNKNOWN),
     ({("GET", META): (403, {"errors": ["permission denied"]})}, UNKNOWN),
+    # KV v1: metadata/<pfad> ist dort nur ein fehlender Schlüssel, nie Beweis für "fehlt"
+    ({("GET", META): (404, {}), ("GET", MOUNT): (200, {"data": {"type": "kv", "options": {"version": "1"}}})},
+     UNKNOWN),
+    ({("GET", META): (404, {}), ("GET", MOUNT): (403, {})}, UNKNOWN),
     ({("GET", META): (503, {})}, UNKNOWN),
     ({("GET", META): (200, {"data": {"current_version": 2, "versions": {
         "2": {"deletion_time": "2026-01-01T00:00:00Z", "destroyed": False}}}})}, CONFLICT),
@@ -108,8 +115,9 @@ def test_policy_validation():
 
     assert check(policyName="app", rules=[{"path": "secret/*", "capabilities": ["read"]}]) == []
     assert check(policyName="app", policy='path "x" { capabilities = ["read"] }') == []
-    assert check(policyName="App", policy="x") == [
-        "spec.policyName must be a non-empty lowercase name without '/' (OpenBao lowercases names)"]
+    for bad in ("App", "default ", " default", "a/b", "ｄefault", "-x", ""):
+        assert check(policyName=bad, policy="x") == [
+            "spec.policyName must match [a-z0-9][a-z0-9_.-]* (OpenBao trims and lowercases names)"]
     assert check(policyName="app") == ["exactly one of spec.rules or spec.policy is required"]
     assert check(policyName="app", rules=[{"path": "x", "capabilities": ['read"]}']}]) == [
         "spec.rules[0].capabilities must be a non-empty list of capability names"]

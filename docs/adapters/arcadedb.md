@@ -54,7 +54,7 @@ spec:
 
 | Feld | Typ | Bedeutung |
 |---|---|---|
-| `databases` | Mapping Datenbank → Liste von Gruppen | ArcadeDBs Zuordnung pro Datenbank (`*` = alle Datenbanken). Gruppen z. B. `admin`, `crud`, `readonly` oder eigene Gruppen aus `server-groups.json`. |
+| `databases` | Mapping Datenbank → Liste von Gruppen | ArcadeDBs Zuordnung pro Datenbank. Gruppen z. B. `crud`, `readonly`, `admin` oder eigene Gruppen aus `server-groups.json`. `*` (alle, auch künftige Datenbanken) wird abgelehnt; mit `spec.scope.databases` am Target muss jede Datenbank im Scope liegen (sonst Config-Fehler). |
 | `credentials` | Engine-Feld | **Pflicht beim Anlegen**: ArcadeDB legt keine Benutzer ohne Passwort (min. 8 Zeichen) an. |
 
 ```yaml
@@ -107,7 +107,14 @@ ist deshalb `username: root` nötig. Mit einem anderen Benutzer ist nur ein eing
 ## Geschützte Objekte
 
 - Benutzer `root` und der Benutzer, mit dem Ordivus sich verbindet, sind Systemobjekte:
-  nicht deklariert → `IGNORE`; nie gelöscht, nie geändert.
+  nicht deklariert → `IGNORE`; nie gelöscht, nie geändert. Deklariert → `BLOCKED`, auch wenn sie
+  wegen `scope.users` nie entdeckt werden (sonst würde ein `CREATE` den bestehenden `root` überschreiben).
+
+## Privilegierte Rechte (`allowPrivilegedGrants`)
+
+Ohne `allowPrivilegedGrants: true` in der Operator-Policy ist ein `DatabaseUser`, der in irgendeiner
+Datenbank die Gruppe **`admin`** erhalten soll, `BLOCKED` (Schema, Sicherheit und Konfiguration der
+Datenbank). `root` und der eigene Login bleiben auch mit Freigabe gesperrt.
 - `DELETE` nur in `authoritative`-Modus mit Operator-Freigabe (`allowAuthoritative`, `allowDelete`)
   und vollständiger Discovery.
 

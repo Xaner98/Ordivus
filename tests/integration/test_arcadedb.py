@@ -102,7 +102,7 @@ def user(name, cred, **spec):
 def test_plan_apply_converge(p, cfg, caplog):
     caplog.set_level(logging.DEBUG)
     db, name, canary = f"{p}graph", f"{p}writer", f"CANARY-{secrets.token_hex(8)}"
-    path = cfg(doc("Database", db, targetRef="adb"), *user(name, "pw", databases={db: ["crud", "admin", "crud"]}))
+    path = cfg(doc("Database", db, targetRef="adb"), *user(name, "pw", databases={db: ["crud", "readonly", "crud"]}))
     (cfg.secrets / "pw").write_text(canary)
 
     plan = run(path, "plan")
@@ -111,7 +111,7 @@ def test_plan_apply_converge(p, cfg, caplog):
 
     first = run(path, "apply")
     assert all(o["status"] == "succeeded" for o in first["operations"] if o["action"] in MUTATING), first["operations"]
-    assert db in databases() and users()[name] == {db: ["admin", "crud"]}
+    assert db in databases() and users()[name] == {db: ["crud", "readonly"]}
     assert can_login(name, canary) is True and can_login(name, "wrong-password") is False
 
     second = run(path, "apply")
@@ -177,7 +177,7 @@ def test_authoritative_deletes_only_in_scope(p, cfg):
 
 def test_injection_prone_names(p, cfg):
     name = f'{p}a"b {{c}}: [d],\\ e\'f'
-    weird_db = p + 'x"}, "*": ["admin"]'
+    weird_db = p + 'x"}, "*": ["crud"]'
     path = cfg(*user(name, "pw", databases={weird_db: ["crud"]}))
     rep = run(path, "apply")
     assert ("DatabaseUser", name, "CREATE") in actions(rep)
@@ -199,3 +199,33 @@ def test_read_only_session_cannot_mutate(p):
         with pytest.raises(PermanentError):
             adapter._request(session, "POST", "/api/v1/server/users", {"name": name, "password": "password-123"})
     assert name not in users() and db not in databases()
+
+
+def test_privileged_and_out_of_scope_databases(p, cfg, tmp_path):
+    """C10: '*' immer abgelehnt; Gruppe admin nur mit allowPrivilegedGrants; root nie, auch außerhalb des Scopes."""
+    name = f"{p}adm"
+    with pytest.raises(ConfigError, match="all databases"):
+        engine.prepare(config.load(cfg(*user(name, "pw", databases={"*": ["readonly"]}))))
+    path = cfg(*user(name, "pw", databases={f"{p}db": ["admin"]}))
+    rep = run(path, "apply")
+    op = next(o for o in rep["operations"] if o["id"] == name)
+    assert op["action"] == "BLOCKED" and "allowPrivilegedGrants" in op["reason"] and name not in users()
+    run(path, "apply", allowPrivilegedGrants=True)
+    assert users()[name] == {f"{p}db": ["admin"]}
+
+    scoped = {"databases": {"include": [f"{p}*"]}, "users": {"include": [f"{p}*"]}}
+    adapter = ArcadeDBAdapter()
+    errors = adapter.validate_target({**TARGET, "scope": scoped},
+                                     [Resource("DatabaseUser", name, {"databases": {"other": ["readonly"]}})])
+    assert errors and "outside spec.scope.databases" in errors[0]
+    before = users()["root"]
+    with adapter.connect({**TARGET, "scope": scoped}, Secret(ROOT_PW), write=True) as session:
+        assert "root" not in {r.id for r in adapter.discover(session, "DatabaseUser", scoped).resources}
+        root_user = Resource("DatabaseUser", "root", {"databases": {f"{p}db": ["readonly"]}})
+        assert "protected" in adapter.check(session, root_user, allow_privileged=True)
+        with pytest.raises(PermanentError, match="protected"):
+            adapter.apply(session, Op("adb", "DatabaseUser", "root", CREATE, desired=root_user,
+                                      password=Secret(ROOT_PW)))
+    assert users()["root"] == before
+    assert adapter.validate({"kind": "Target", "metadata": {"name": "t"},
+                             "spec": {"endpoint": {"host": "evil@host/x"}}})

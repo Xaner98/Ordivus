@@ -18,6 +18,7 @@ HOST = os.environ.get("ORDIVUS_TEST_HOST", "localhost")
 PORT = 13306
 ROOT_PASSWORD = os.environ.get("ORDIVUS_TEST_MYSQL_PASSWORD", "ordivus-root")
 ENDPOINT = {"host": HOST, "port": PORT, "user": "root", "tls": {"mode": "require"}}
+TLS = ("disable", "require", "verify-ca", "verify-full")
 
 
 def doc(kind, name, /, **spec):
@@ -80,12 +81,13 @@ def my(tmp_path):
     secret_dir.mkdir()
     (secret_dir / "admin").write_text(ROOT_PASSWORD)
 
-    def write(*extra, endpoint=ENDPOINT):
+    def write(*extra, endpoint=ENDPOINT, **target):
         directory = tmp_path / "config"
         directory.mkdir(exist_ok=True)
         for f in directory.iterdir():
             f.unlink()
-        base = [doc("Target", "my", adapter="mysql", endpoint=endpoint, authentication={"credentialRef": "admin"}),
+        base = [doc("Target", "my", adapter="mysql", endpoint=endpoint, authentication={"credentialRef": "admin"},
+                    **target),
                 doc("CredentialProvider", "files", type="file", directory=str(secret_dir)),
                 doc("Credential", "admin", providerRef="files", path="admin")]
         for i, d in enumerate(base + list(extra)):
@@ -130,14 +132,15 @@ def full_config(my):
 def test_plan_apply_converge_and_login(my):
     p, path = my.prefix, full_config(my)
     before = snapshot()
-    rep = run(path, "plan")
+    rep = run(path, "plan", allowPrivilegedGrants=True)  # g2 ist global
     assert set(mutating(rep)) == {("Credential", "app-pw", "CREATE_SECRET"), ("Database", f"{p}app", "CREATE"),
                                   ("DatabaseRole", f"{p}reader@%", "CREATE"), ("DatabaseUser", f"{p}app@%", "CREATE"),
                                   ("Grant", f"{p}reader@% ON `{p}app`.*", "CREATE"),
                                   ("Grant", f"{p}app@% ON *.*", "CREATE")}
     assert snapshot() == before and not (my.secrets / "app").exists()  # plan ändert nichts
 
-    rep = run(path, "apply")
+    assert ("Grant", f"{p}app@% ON *.*", "BLOCKED") in actions(run(path, "plan"))  # ohne Policy: gesperrt
+    rep = run(path, "apply", allowPrivilegedGrants=True)
     assert report.exit_code(rep) == 0, problems(rep)
     assert all(o["status"] == "succeeded" for o in rep["operations"] if o["action"] in engine.MUTATING)
     assert can_login(f"{p}app", (my.secrets / "app").read_text())  # Secret fehlte → erzeugt, Login klappt
@@ -145,15 +148,15 @@ def test_plan_apply_converge_and_login(my):
                f"{p}app") == (("utf8mb4_bin",),)
     assert sql("SELECT DEFAULT_ROLE_USER FROM mysql.default_roles WHERE USER=%s", f"{p}app") == ((f"{p}reader",),)
 
-    rep = run(path, "apply")
+    rep = run(path, "apply", allowPrivilegedGrants=True)
     assert mutating(rep) == [] and rep["targets"][0]["status"] == "in_sync"
 
     # Drift: Privileg entzogen, Rolle entzogen → UPDATE stellt es wieder her
     sql(f"REVOKE INSERT ON {quote_ident(escaped(p + 'app'))}.* FROM %s@'%%'", f"{p}reader")
     sql("REVOKE %s@'%%' FROM %s@'%%'", f"{p}reader", f"{p}app")
-    rep = run(path, "apply")
+    rep = run(path, "apply", allowPrivilegedGrants=True)
     assert {a[2] for a in mutating(rep)} == {"UPDATE"} and report.exit_code(rep) == 0
-    assert mutating(run(path, "plan")) == []
+    assert mutating(run(path, "plan", allowPrivilegedGrants=True)) == []
 
 
 def test_undeclared_unmanaged_survives_additive(my):
@@ -308,6 +311,11 @@ def test_validation():
     assert a.validate(doc("DatabaseUser", "u", identity={"username": "u"}, roles=["a"], defaultRoles=["b"]))
     assert a.validate(doc("Target", "t", endpoint={"host": "h", "username": "u", "tls": {"mode": "off"}}, x=1))
     assert a.validate(doc("Database", "d", collation="utf8; DROP")) and not a.validate(doc("Database", "d"))
+    for db in ("mysql", "SYS", "performance_schema", "information_schema"):  # mysql.* schreiben = root
+        assert any("system database" in e for e in a.validate(
+            doc("Grant", "g", grantee="x", on="database", database=db, privileges=["SELECT"])))
+    ep = {"host": "h", "user": "u"}
+    assert [a.insecure_transport({"endpoint": {**ep, "tls": {"mode": m}}}) for m in TLS] == [True, True, True, False]
     g = a.desired(doc("Grant", "g", grantee="r", on="table", database="d.b", table="t", privileges=["select", "a b"]))
     assert g.id == "r@% ON `d.b`.`t`" and g.attrs["privileges"] == ["A B", "SELECT"]
 
@@ -337,9 +345,9 @@ def test_table_grant_and_grant_option_converge(my):
     path = my(doc("DatabaseRole", "r", targetRef="my", identity={"username": f"{p}w"}),
               doc("Grant", "t", targetRef="my", grantee=f"{p}w", on="table", database=f"{p}d", table="or.ders",
                   privileges=["insert", "update", "grant option"]))
-    rep = run(path, "apply")
+    rep = run(path, "apply", allowPrivilegedGrants=True)  # GRANT OPTION ist privilegiert
     assert ("Grant", f"{p}w@% ON `{p}d`.`or.ders`", "CREATE") in actions(rep) and report.exit_code(rep) == 0
-    assert mutating(run(path, "apply")) == []
+    assert mutating(run(path, "apply", allowPrivilegedGrants=True)) == []
 
 
 def test_database_grant_is_not_a_wildcard(my):
@@ -363,3 +371,98 @@ def test_database_grant_is_not_a_wildcard(my):
     wild = next(o for o in rep["operations"] if o["id"].endswith("(wildcard pattern)"))
     assert wild["action"] == "UNMANAGED" and wild["manageable"] is False
     assert mutating(rep) == []
+
+
+# --- Sicherheitsgrenzen (INV-10, Review C3/C4/C5/L4) ---------------------------------------------
+
+def test_privileged_roles_and_grants_need_policy(my):
+    p = my.prefix
+    sql("CREATE USER %s@'%%' IDENTIFIED BY 'other-user-pw-1'", f"{p}peer")
+    sql("CREATE ROLE %s", f"{p}boss")
+    sql("GRANT CREATE USER ON *.* TO %s", f"{p}boss")
+    sql("CREATE ROLE %s, %s", f"{p}plain", f"{p}wrap")
+    sql("GRANT %s TO %s", f"{p}boss", f"{p}wrap")  # transitiv privilegiert
+    (my.secrets / "u").write_text("user-pw-1234567")
+    cases = {"root": ["root@%"], "self": ["root@localhost"], "peer": [f"{p}peer"], "boss": [f"{p}boss"],
+             "wrap": [f"{p}wrap"], "ok": [f"{p}plain"]}
+    path = my(doc("Credential", "u", providerRef="files", path="u"),
+              *[user_doc(f"{p}{k}", "u", roles=r) for k, r in cases.items()],
+              doc("Grant", "g1", targetRef="my", grantee=f"{p}ok", on="global", privileges=["SELECT"]),
+              doc("Grant", "g2", targetRef="my", grantee=f"{p}ok", on="database", database=f"{p}x",
+                  privileges=["SELECT", "GRANT OPTION"]),
+              doc("Grant", "g3", targetRef="my", grantee=f"{p}ok", on="database", database=f"{p}y",
+                  privileges=["SELECT"]),
+              doc("Grant", "g4", targetRef="my", grantee="root", on="database", database=f"{p}x",
+                  privileges=["SELECT"]))
+
+    def blocked(rep):
+        return {o["id"] for o in rep["operations"] if o["action"] == "BLOCKED"}
+
+    grants = {f"{p}ok@% ON *.*", f"{p}ok@% ON `{p}x`.*"}
+    assert blocked(run(path, "plan")) == {f"{p}{k}@%" for k in ("root", "self", "peer", "boss", "wrap")} | grants | {
+        f"root@% ON `{p}x`.*"}
+    # mit Policy: nur Systemkonten bleiben gesperrt (root als Rolle oder Grantee)
+    assert blocked(run(path, "plan", allowPrivilegedGrants=True)) == {f"{p}root@%", f"{p}self@%",
+                                                                       f"root@% ON `{p}x`.*"}
+    rep = run(path, "apply")
+    assert report.exit_code(rep) == 11
+    edges = set(sql("SELECT FROM_USER, TO_USER FROM mysql.role_edges WHERE TO_USER LIKE %s",
+                    p.replace("_", "\\_") + "%"))
+    assert edges == {(f"{p}boss", f"{p}wrap"), (f"{p}plain", f"{p}ok")}  # nur die unprivilegierte Rolle vergeben
+    assert not sql("SELECT 1 FROM mysql.global_grants WHERE USER LIKE %s", p.replace("_", "\\_") + "%ok")
+
+
+def test_grant_outside_scope_is_blocked_and_refused(my):
+    p = my.prefix
+    sql("CREATE ROLE %s", f"{p}r")
+    path = my(doc("Grant", "g", targetRef="my", grantee=f"{p}r", on="database", database="otherdb",
+                  privileges=["SELECT"]), scope={"databases": {"include": [f"{p}*"]}})
+    op = next(o for o in run(path, "plan")["operations"] if o["kind"] == "Grant")
+    assert op["action"] == "BLOCKED" and "outside the target scope" in op["reason"]
+    adapter = MySQLAdapter()
+    target = {"endpoint": ENDPOINT, "scope": {"databases": {"include": [f"{p}*"]}}}
+    g = adapter.desired(doc("Grant", "g", grantee=f"{p}r", on="database", database="otherdb", privileges=["SELECT"]))
+    with adapter.connect(target, Secret(ROOT_PASSWORD), write=True) as session:
+        with pytest.raises(PermanentError, match="outside the scope"):  # zweite Schicht in apply
+            adapter.apply(session, Op("my", "Grant", g.id, CREATE, desired=g))
+    assert not sql("SELECT 1 FROM mysql.db WHERE User=%s", f"{p}r")
+
+
+def test_verify_never_locks_accounts(my):
+    p = my.prefix
+    sql("CREATE USER %s@'%%' IDENTIFIED BY 'right-password-1' FAILED_LOGIN_ATTEMPTS 2 PASSWORD_LOCK_TIME 1",
+        f"{p}lock")
+    sql("CREATE USER %s@'10.0.0.%%' IDENTIFIED BY 'right-password-2'", f"{p}far")
+    (my.secrets / "stale").write_text("stale-password-1")
+    path = my(doc("Credential", "stale", providerRef="files", path="stale"), user_doc(f"{p}lock", "stale"),
+              doc("DatabaseUser", "far", targetRef="my", identity={"username": f"{p}far", "host": "10.0.0.%"},
+                  credentials={"credentialRef": "stale"}))
+    for _ in range(3):
+        rep = run(path, "drift")
+        assert {o["id"]: o["action"] for o in rep["operations"] if o["id"].startswith(p)} == {
+            f"{p}lock@%": "UNKNOWN", f"{p}far@10.0.0.%": "UNKNOWN"}  # nie SET_PASSWORD ohne Beweis
+    assert can_login(f"{p}lock", "right-password-1")  # kein Login-Versuch → keine Sperre
+    assert report.exit_code(run(path, "apply")) == 13  # unprüfbar: incomplete, nichts geändert
+    assert can_login(f"{p}lock", "right-password-1")
+
+
+def test_admin_roles_are_never_dropped(my):
+    p = my.prefix
+    sql("CREATE ROLE %s, %s", f"{p}adminrole", f"{p}inner")
+    sql("GRANT ALL ON *.* TO %s WITH GRANT OPTION", f"{p}inner")
+    sql("GRANT %s TO %s", f"{p}inner", f"{p}adminrole")
+    sql("CREATE USER %s@'%%' IDENTIFIED BY 'admin-pw-12345' DEFAULT ROLE %s", f"{p}adm", f"{p}adminrole")
+    sql("GRANT %s TO %s@'%%'", f"{p}adminrole", f"{p}adm")
+    sql("SET DEFAULT ROLE ALL TO %s@'%%'", f"{p}adm")
+    sql("GRANT CREATE USER, ROLE_ADMIN ON *.* TO %s@'%%'", f"{p}adm")
+    sql("CREATE ROLE %s", f"{p}junk")
+    (my.secrets / "admin").write_text("admin-pw-12345")
+    kinds = ["Database", "DatabaseRole", "DatabaseUser", "Grant"]
+    path = my(doc("ReconciliationPolicy", "gov", targetRef="my", mode="authoritative",
+                  scope={"resourceKinds": kinds, "DatabaseRole": {"glob": [f"{p}*"]}, "Grant": {"glob": [f"{p}*"]},
+                         "DatabaseUser": {"glob": [f"{p}*"]}, "Database": {"glob": [f"{p}*"]}}),
+              endpoint={**ENDPOINT, "user": f"{p}adm"})
+    rep = run(path, "apply", allowAuthoritative=True, allowDelete=True)
+    assert set(mutating(rep)) == {("DatabaseRole", f"{p}junk@%", "DELETE")}, rep["operations"]
+    roles = {u for (u,) in sql("SELECT User FROM mysql.user")}
+    assert {f"{p}adminrole", f"{p}inner"} <= roles and f"{p}junk" not in roles

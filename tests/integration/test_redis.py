@@ -87,7 +87,8 @@ def cfg(tmp_path):
 
 
 def run(path, mode, **policy):
-    return engine.run(mode, config.load(path), OperatorPolicy(**policy))
+    # Regel-Tests nutzen bewusst privilegierte Befehle; die Sperre selbst prüft test_privileged_commands_*
+    return engine.run(mode, config.load(path), OperatorPolicy(**{"allowPrivilegedGrants": True, **policy}))
 
 
 def actions(rep):
@@ -245,3 +246,33 @@ def test_persist_without_config_file_fails_before_changes(cfg, client):
     rep = run(path, "apply")
     assert rep["targets"][0]["status"] == "error" and "config file" in rep["targets"][0]["reason"]
     assert "it_a" not in client.acl_users()
+
+
+@pytest.mark.parametrize("commands, privileged", [
+    (["+@all"], True), (["allcommands", "-flushall"], True), (["+@admin"], True), (["+@dangerous"], True),
+    (["+config|set"], True), (["+config"], True), (["+acl"], True), (["+module"], True), (["+debug"], True),
+    (["+shutdown"], True), (["+@read"], True),  # @read enthält KEYS (@dangerous)
+    (["+@read", "+@write", "-@dangerous"], False), (["+get", "+set", "+ping"], False),
+    (["+@all", "-@admin", "-@dangerous"], False), (["+config", "-config"], False), (["nocommands"], False),
+])
+def test_privileged_commands_blocked_without_policy(cfg, client, commands, privileged):
+    path = cfg(user("it_priv", keys=["*"], commands=commands))
+    rep = engine.run("apply", config.load(path), OperatorPolicy())
+    op = next(o for o in rep["operations"] if o["id"] == "it_priv")
+    if privileged:
+        assert op["action"] == "BLOCKED" and "allowPrivilegedGrants" in op["reason"], op
+        assert "it_priv" not in client.acl_users()
+    else:
+        assert op["action"] == "CREATE" and op["status"] == "succeeded", op
+
+
+def test_existing_privileges_are_not_blocked_only_new_ones(cfg, client):
+    client.execute_command("ACL", "SETUSER", "it_old", "on", "~*", "+@read")  # hat KEYS schon
+    path = cfg(user("it_old", keys=["*"], commands=["+@read", "+set"]))
+    rep = engine.run("apply", config.load(path), OperatorPolicy())
+    assert {o["action"] for o in rep["operations"] if o["id"] == "it_old"} == {"UPDATE"}
+    rep = engine.run("plan", config.load(cfg(user("it_old", commands=["+@read", "+flushall"]))), OperatorPolicy())
+    op = next(o for o in rep["operations"] if o["id"] == "it_old")
+    assert op["action"] == "BLOCKED" and "flushall" in op["reason"]
+    client.execute_command("ACL", "SETUSER", "it_adm", "on", "+@all")  # nicht deklariert: bleibt UNMANAGED
+    assert ("it_adm", "UNMANAGED") in actions(engine.run("plan", config.load(path), OperatorPolicy()))

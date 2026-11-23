@@ -3,8 +3,10 @@
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
+import traceback
 from collections import Counter
 from enum import IntEnum
 from importlib.metadata import version
@@ -65,9 +67,14 @@ def _run(args) -> ExitCode:
     finally:
         logger.removeHandler(handler)
     text = (report.render_json if args.format == "json" else report.render_human)(result) + "\n"
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
+    if args.output:  # 0600 und kein Symlink: der Report kann Rechte- und Inventardetails enthalten
+        try:
+            fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            print(f"cannot write report to {args.output}: {e.strerror}", file=sys.stderr)
+            return ExitCode.INTERNAL
     else:
         sys.stdout.write(text)
     return ExitCode(report.exit_code(result, args.fail_on))
@@ -92,7 +99,7 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_argument("--output", help="write the report to FILE instead of stdout")
         sub.add_argument("--target", action="append", help="only this target (repeatable)")
         if name == "drift":
-            sub.add_argument("--fail-on", choices=["actionable", "unmanaged", "any"])
+            sub.add_argument("--fail-on", choices=["actionable", "unmanaged", "unknown", "any"])
         elif name == "plan":
             sub.add_argument("--fail-on", choices=["changes"])
         sub.set_defaults(handler=_run, fail_on=None)
@@ -116,5 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         return ExitCode.SIGINT
     except Terminated:
         return ExitCode.SIGTERM
+    except Exception as e:  # nur der Typ: Meldung und Traceback können Secrets enthalten
+        print(f"internal error: {type(e).__name__} (set ORDIVUS_DEBUG=1 for details)", file=sys.stderr)
+        if os.environ.get("ORDIVUS_DEBUG") == "1":
+            traceback.print_exc()
+        return ExitCode.INTERNAL
     finally:
         signal.signal(signal.SIGTERM, previous)

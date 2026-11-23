@@ -17,6 +17,7 @@ import hashlib
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 
 from ordivus.adapters.base import (
     COMPLETE,
@@ -41,6 +42,7 @@ USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}")
 COMMAND = re.compile(r"[+-](@[a-z0-9_-]+|[a-z0-9_.-]+(\|[a-z0-9_.-]+)?)")
 ALIASES = {"allcommands": "+@all", "nocommands": "-@all"}
 KEY_PREFIX = re.compile(r"%(R|W|RW)~")
+PRIVILEGED_CATEGORIES = ("admin", "dangerous")  # allowPrivilegedGrants: jeder Befehl daraus ist privilegiert
 
 
 # --- Normalisierung (gemeinsam für Soll und Ist) -------------------------------------------------
@@ -94,6 +96,19 @@ def _attrs(spec: dict) -> dict:
     return attrs
 
 
+def _allowed(commands: list[str], command: str, category) -> bool:
+    """Ob die normalisierte Regelliste ``command`` (``cmd`` oder ``cmd|sub``) erlaubt; ``category(name)``
+    liefert die Befehle einer Kategorie (ACL CAT). Spätere Regeln gewinnen, wie in Redis."""
+    allowed = commands[0] == "+@all"
+    for rule in commands[1:]:
+        name = rule[1:]
+        hit = command in category(name[1:]) if name.startswith("@") else \
+            command == name or ("|" not in name and command.startswith(name + "|"))
+        if hit:
+            allowed = rule[0] == "+"
+    return allowed
+
+
 def _rules(attrs: dict) -> list[str]:
     """ACL-SETUSER-Regeln nur für die übergebenen Felder; jede Feldgruppe beginnt mit ihrem Reset."""
     rules = []
@@ -116,6 +131,7 @@ class RedisSession:
     write: bool
     protected: frozenset
     persist: str
+    categories: dict = dc_field(default_factory=dict)  # ACL CAT je Kategorie, pro Session gecacht
 
 
 def _error(e: Exception, secret: Secret | None = None) -> Exception:
@@ -220,6 +236,38 @@ class RedisAdapter(Adapter):
             raise _error(e, secret) from None
         finally:
             client.close()
+
+    def _category(self, session, name: str) -> frozenset:
+        if name not in session.categories:
+            session.categories[name] = frozenset(
+                c.lower() for c in session.client.execute_command("ACL", "CAT", name))
+        return session.categories[name]
+
+    def _privileged(self, session, commands: list[str]) -> set:
+        category = lambda name: self._category(session, name)  # noqa: E731
+        candidates = set().union(*(category(c) for c in PRIVILEGED_CATEGORIES))
+        return {c for c in candidates if _allowed(commands, c, category)}
+
+    def check(self, session, resource, allow_privileged=False):
+        import redis
+
+        if resource.id in session.protected:
+            return f"user {resource.id!r} is protected (default or the Ordivus login)"
+        if allow_privileged or "commands" not in resource.attrs:
+            return None
+        try:
+            added = self._privileged(session, resource.attrs["commands"])
+            if added:  # nur neu hinzukommende Rechte sperren; bestehende bleiben unangetastet erlaubt
+                info = session.client.execute_command("ACL", "GETUSER", resource.id)
+                if info is not None:
+                    added -= self._privileged(session, _commands(info["commands"].split()))
+        except redis.exceptions.RedisError as e:
+            return f"cannot resolve ACL categories to check for privileged commands ({type(e).__name__})"
+        if added:
+            shown = ", ".join(sorted(added)[:8]) + (", ..." if len(added) > 8 else "")
+            return (f"privileged commands (@admin/@dangerous: {shown}) not permitted by operator policy "
+                    "allowPrivilegedGrants")
+        return None
 
     def discover(self, session, kind, scope):
         import redis

@@ -88,14 +88,15 @@ def cfg(tmp_path):
     secrets_dir.mkdir()
     (secrets_dir / "admin").write_text(ADMIN_PW)
 
-    def write(*extra, secrets=None):
+    def write(*extra, secrets=None, scope=None):
         for name, value in (secrets or {}).items():
             (secrets_dir / f"pw-{name}").write_text(value)
         directory = tmp_path / "config"
         directory.mkdir(exist_ok=True)
         for f in directory.iterdir():
             f.unlink()
-        docs = [doc("Target", "ch", adapter="clickhouse", endpoint=ENDPOINT, authentication={"credentialRef": "admin"}),
+        docs = [doc("Target", "ch", adapter="clickhouse", endpoint=ENDPOINT, authentication={"credentialRef": "admin"},
+                    **({"scope": scope} if scope else {})),
                 doc("CredentialProvider", "files", type="file", directory=str(secrets_dir)), cred("admin")]
         docs += [cred(d["spec"]["credentials"]["credentialRef"]) for d in extra if "credentials" in d["spec"]]
         for i, d in enumerate(docs + list(extra)):
@@ -280,8 +281,13 @@ def test_validate_rejects_unsafe_values():
     assert v({"kind": "DatabaseUser", "spec": {"hostIp": ["10.0.0.0/8", "::1"]}}) == []
     assert v({"kind": "DatabaseUser", "spec": {"hostIp": ["not-an-ip"]}})
     assert v({"kind": "Database", "spec": {"engine": "Memory; DROP DATABASE x"}})
-    for p in ("ALL", "SELECT; DROP USER admin", "SELECT(x)", "all privileges"):
+    for p in ("ALL", "SELECT; DROP USER admin", "SELECT(x)", "all privileges", "CURRENT GRANTS", "current  grants",
+              "NONE", "USAGE", "no privileges"):
         assert v({"kind": "Grant", "spec": {"grantee": "r", "privileges": [p]}}), p
+    for db in ("system", "information_schema", "INFORMATION_SCHEMA"):  # dort unsichtbar für scoped Discovery
+        assert v({"kind": "Grant", "spec": {"grantee": "r", "database": db, "privileges": ["SELECT"]}}), db
+    for host in ("evil.example/x", "user@evil.example", "h?x", "h#x", "h x"):
+        assert v({"kind": "Target", "spec": {"endpoint": {"host": host}}}), host
     assert v({"kind": "Grant", "spec": {"grantee": "r", "table": "t", "privileges": ["SELECT"]}})
     assert v({"kind": "Target", "spec": {"endpoint": {"host": "h", "user": "a:b"}}})
 
@@ -293,3 +299,100 @@ def test_unreachable_and_bad_credentials_are_target_errors(cfg):
     target = {"endpoint": {"host": HOST, "port": 1}}
     with pytest.raises(TransientError), CH.connect(target, None, write=False):
         pass
+
+
+def blocked(rep):
+    return {o["id"]: o["reason"] for o in rep["operations"] if o["action"] == "BLOCKED"}
+
+
+def grants_of(name):
+    return [next(iter(r.values())) for r in root(f"SHOW GRANTS FOR {qi(name)} FORMAT JSON")]
+
+
+def test_privileged_grants_need_operator_policy(cfg):
+    """C6: Admin-, System-, Quellen- und Geheimnisrechte (auch Aliase/Unterrechte) nur mit allowPrivilegedGrants."""
+    privileged = [["ACCESS MANAGEMENT"], ["CREATE USER"], ["ROLE ADMIN"], ["SHUTDOWN"], ["SYSTEM FLUSH LOGS"],
+                  ["FILE"], ["S3"], ["URL"], ["SOURCES"], ["INTROSPECTION FUNCTIONS"],
+                  ["displaySecretsInShowAndSelect"],
+                  ["KILL QUERY"], ["SHOW NAMED COLLECTIONS SECRETS"], ["SELECT"]]  # SELECT: global *.* ist privilegiert
+    for i in range(len(privileged)):
+        root(f"CREATE ROLE oit_r{i}")
+    root("CREATE ROLE oit_ok")
+    docs = [res("Grant", f"g{i}", grantee=f"oit_r{i}", privileges=p) for i, p in enumerate(privileged)]
+    docs += [res("Database", "oit_db"), res("Grant", "ok", grantee="oit_ok", database="oit_db", privileges=["SELECT"]),
+             res("Grant", "unknown", grantee="oit_ok", privileges=["NO SUCH PRIV"])]
+    path = cfg(*docs)
+    rep = run(path, "apply")
+    reasons = blocked(rep)
+    unknown = grant_id("oit_ok", None, None)
+    assert set(reasons) == {grant_id(f"oit_r{i}", None, None) for i in range(len(privileged))} | {unknown}
+    assert reasons[unknown].startswith("unknown privilege")
+    assert all("allowPrivilegedGrants" in r for k, r in reasons.items() if k != unknown), reasons
+    assert engine_exit(rep) == 11
+    assert grants_of("oit_ok") == ["GRANT SELECT ON oit_db.* TO oit_ok"]
+    assert all(grants_of(f"oit_r{i}") == [] for i in range(len(privileged)))
+    allowed = cfg(res("Grant", "g11", grantee="oit_r11", privileges=["KILL QUERY"]),
+                  res("Grant", "g10", grantee="oit_r10", privileges=["displaySecretsInShowAndSelect"]), docs[-1])
+    rep = run(allowed, "apply", allowPrivilegedGrants=True)
+    assert list(blocked(rep)) == [unknown]  # unbekannt bleibt gesperrt
+    assert [o["status"] for o in mutating(rep)] == ["succeeded", "succeeded"]
+    assert grants_of("oit_r10") == ["GRANT displaySecretsInShowAndSelect ON *.* TO oit_r10"]
+    assert grants_of("oit_r11") == ["GRANT KILL QUERY ON *.* TO oit_r11"]
+
+
+def engine_exit(rep):
+    from ordivus.core import report
+    return report.exit_code(rep)
+
+
+def test_current_grants_config_is_rejected(cfg):
+    with pytest.raises(config.ConfigError, match="CURRENT GRANTS"):
+        run(cfg(res("Grant", "g", grantee="oit_r", privileges=["CURRENT GRANTS"])), "plan")
+
+
+def test_roles_with_privileged_grants_need_operator_policy(cfg):
+    root("CREATE ROLE oit_power")
+    root("GRANT ACCESS MANAGEMENT ON *.* TO oit_power")
+    root("CREATE ROLE oit_plain")
+    root("GRANT oit_power TO oit_plain")  # transitiv
+    path = cfg(user("oit_u", roles=["oit_plain"]))
+    assert "allowPrivilegedGrants" in blocked(run(path, "apply"))["oit_u"]
+    assert "oit_u" not in names("users")
+    rep = run(path, "apply", allowPrivilegedGrants=True)
+    assert blocked(rep) == {} and "oit_u" in names("users")
+
+
+def test_scope_limits_grants_and_databases(cfg):
+    """C7: Grants/Datenbanken außerhalb scope.databases und globale Grants mit Scope werden gesperrt."""
+    root("CREATE ROLE oit_r")
+    path = cfg(res("Database", "other_db"), res("Grant", "out", grantee="oit_r", database="other_db",
+                                                 privileges=["SELECT"]),
+               res("Grant", "glob", grantee="oit_r", privileges=["SELECT"]),
+               res("Grant", "in", grantee="oit_r", database="oit_db", privileges=["SELECT"]), res("Database", "oit_db"),
+               scope={"databases": {"include": ["oit_*"]}})
+    rep = run(path, "apply", allowPrivilegedGrants=True)
+    assert set(blocked(rep)) == {"other_db", grant_id("oit_r", "other_db", None), grant_id("oit_r", None, None)}
+    assert all("outside spec.scope.databases" in r for r in blocked(rep).values())
+    assert grants_of("oit_r") == ["GRANT SELECT ON oit_db.* TO oit_r"]
+    assert "other_db" not in {r["name"] for r in root("SELECT name FROM system.databases FORMAT JSON")}
+    # zweite Sperre im Adapter: apply verweigert auch ohne Engine
+    with CH.connect({"endpoint": ENDPOINT, "scope": {"databases": {"include": ["oit_*"]}}}, Secret(ADMIN_PW),
+                    write=True) as s:
+        g = CH.desired(doc("Grant", "x", grantee="oit_r", privileges=["SELECT"], database="other_db"))
+        with pytest.raises(PermanentError, match="outside"):
+            CH.apply(s, Op("ch", "Grant", g.id, "CREATE", desired=g))
+
+
+def test_admin_roles_are_protected(cfg):
+    """L4: Rollen des Verbindungsbenutzers (transitiv) werden nie entzogen, gelöscht oder geändert."""
+    root("CREATE DATABASE oit_db")
+    for sql in ("CREATE ROLE oit_adm1", "CREATE ROLE oit_adm2", "GRANT oit_adm2 TO oit_adm1",
+                f"GRANT oit_adm1 TO {ADMIN}", "GRANT SELECT ON oit_db.* TO oit_adm2"):
+        root(sql)
+    rep = run(cfg(authoritative(resourceKinds=list(CH.kinds))), "apply", allowAuthoritative=True, allowDelete=True)
+    assert not [o for o in rep["operations"] if o["action"] == DELETE and "oit_adm" in o["id"]]
+    assert names("roles") >= {"oit_adm1", "oit_adm2"} and grants_of("oit_adm2") == [
+        "GRANT SELECT ON oit_db.* TO oit_adm2"]
+    rep = run(cfg(res("Grant", "g", grantee="oit_adm2", database="oit_db", privileges=["INSERT"])), "apply",
+              allowPrivilegedGrants=True)
+    assert "protected" in blocked(rep)[grant_id("oit_adm2", "oit_db", None)]

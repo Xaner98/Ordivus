@@ -38,14 +38,14 @@ Ein nicht gesetztes Feld heißt **nicht** „zurücksetzen“: Verglichen werden
 
 ## Unbekannt bleibt unbekannt
 
-Fehlen Leserechte, läuft eine Abfrage in einen Timeout oder liefert ein Zielsystem nur einen Teil seiner Objekte, meldet Ordivus `partial`, `forbidden` oder `unknown` – niemals „leer“. Darauf beruhen alle Schutzmechanismen gegen falsches Löschen.
+Fehlen Leserechte, läuft eine Abfrage in einen Timeout oder liefert ein Zielsystem nur einen Teil seiner Objekte, meldet Ordivus `partial`, `forbidden` oder `unknown` – niemals „leer“. Darauf beruhen alle Schutzmechanismen gegen falsches Löschen. Umgekehrt meldet `apply` ein Target mit einer deklarierten, aber nicht prüfbaren Ressource als `incomplete` (Exit-Code 13), nie als `in_sync`.
 
 ## Passwörter
 
 Passwörter stehen nie in der Konfiguration, sondern in einem **Credential Provider** (Datei/gemountetes Kubernetes Secret, OpenBao KV v2, Umgebungsvariable nur zur Entwicklung).
 
 - Fehlt das Secret, erzeugt `apply` ein kryptografisch zufälliges Passwort, legt es *create-if-absent* im Provider ab und setzt es am Benutzer. `plan` zeigt dies vorher als `CREATE_SECRET`.
-- Standard für bestehende Benutzer ist `passwordPolicy: verify`: Ordivus prüft bei jedem Lauf am Zielsystem, ob das Passwort noch stimmt (Anmeldeversuch oder Hash-Vergleich, je nach Adapter), und setzt es bei Abweichung neu.
+- Standard für bestehende Benutzer ist `passwordPolicy: verify`: Ordivus prüft bei jedem Lauf am Zielsystem, ob das Passwort noch stimmt (Anmeldeversuch oder Hash-Vergleich, je nach Adapter), und setzt es bei Abweichung neu. Prüft ein Adapter per Anmeldeversuch, zählen fehlgeschlagene Versuche bei Sperrrichtlinien des Zielsystems mit; dort ist `enforce` die bessere Wahl (Details je Adapter).
 - Alternativen: `enforce` (bei jedem `apply` setzen) und `set-on-create` (nur bei Anlage).
 - Ist der Zustand eines Secrets nicht sicher feststellbar (z. B. fehlende Leserechte), wird **kein** Passwort verändert.
 
@@ -53,7 +53,7 @@ Secrets erscheinen nie im Klartext in Reports, Logs oder Fehlermeldungen.
 
 ## Zwei Arten von Policies
 
-- **Operator Policy** (`--policy datei.yaml`): von Ihrem Plattform- oder Security-Team getrennt verwaltet. Sie legt fest, was überhaupt erlaubt ist: welche Targets, ob `authoritative`, ob Löschen, ob Passwort-Resets.
+- **Operator Policy** (`--policy datei.yaml`): von Ihrem Plattform- oder Security-Team getrennt verwaltet. Sie legt fest, was überhaupt erlaubt ist: welche Targets, ob `authoritative`, ob Löschen, ob Passwort-Resets und ob die Konfiguration privilegierte Rechte vergeben darf (`allowPrivilegedGrants`, Standard nein). Die Konfiguration kann nie mehr Rechte vergeben, als die Operator Policy zulässt.
 - **ReconciliationPolicy** (in der Konfiguration): kann nur *einschränken* – Modus, Scope, Ausnahmen. Ein `mode: authoritative` in der Konfiguration ist ein Antrag, keine Berechtigung.
 
 ## Wo Ordivus läuft

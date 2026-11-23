@@ -3,7 +3,7 @@
 image:
   repository: ghcr.io/EXAMPLE/ordivus
   tag: ""          # Standard: appVersion
-  digest: ""       # "sha256:..." hat Vorrang vor tag (empfohlen, im Profil hardened Pflicht)
+  digest: ""       # "sha256:<64 hex>" hat Vorrang vor tag (empfohlen, im Profil hardened Pflicht)
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -20,8 +20,10 @@ policy:
   secret: ""
   key: policy.yaml
 
-# Credentials-Verzeichnis (für CredentialProvider type=file). Volume-Quelle je Modus getrennt,
-# damit plan/drift keine Apply-Credentials sehen.
+# Credentials-Verzeichnis (für CredentialProvider type=file), immer read-only eingehängt.
+# Volume-Quelle je Modus getrennt, damit plan/drift keine Apply-Credentials sehen.
+# Soll apply mit dem file-Provider neue Secrets schreiben: OpenBao-Provider verwenden oder ein
+# beschreibbares Volume ausdrücklich über jobs.templates.apply.extraVolumes/extraVolumeMounts einhängen.
 credentials:
   mountPath: /var/run/secrets/ordivus
   readOnly: {}   # plan/drift, z. B. {secret: {secretName: ordivus-readonly-credentials}}
@@ -30,7 +32,7 @@ credentials:
 jobs:
   # Suspendierte Vorlagen; Start per kubectl create job --from=cronjob/<release>-<mode> (scripts/run-job.sh).
   templates:
-    plan:  &template
+    plan: &template
       enabled: true
       suspended: true
       schedule: "0 0 1 1 *"         # Pflichtfeld, wirkungslos solange suspended
@@ -42,8 +44,18 @@ jobs:
         expirationSeconds: 600
         mountPath: /var/run/secrets/tokens
       extraArgs: []
+      # Je Modus getrennt, damit Apply-Secrets nie in plan/drift landen.
+      env: []
+      extraVolumes: []
+      extraVolumeMounts: []
     drift: *template
-    apply: *template
+    apply:
+      <<: *template
+      # Eigener Namespace für Apply-CronJob, Apply-ServiceAccount und Apply-Credentials
+      # (Standard: Release-Namespace). Siehe docs/kubernetes.md, Abschnitt Sicherheit.
+      namespace: ""
+      # suspended: false wird nur mit allowSchedule: true akzeptiert (nie im Profil hardened).
+      allowSchedule: false
   # Optionaler, NICHT suspendierter Drift-CronJob mit Zeitplan.
   scheduledDrift:
     enabled: false
@@ -55,19 +67,37 @@ jobs:
       expirationSeconds: 600
       mountPath: /var/run/secrets/tokens
     extraArgs: []
+    env: []
+    extraVolumes: []
+    extraVolumeMounts: []
 
 security:
-  profile: standard                 # development | standard | hardened (hardened erzwingt digest, policy, networkPolicy)
+  # development | standard | hardened (hardened erzwingt u. a. digest, policy, networkPolicy und
+  # getrennten Apply-Namespace oder admission.enabled; Liste in docs/kubernetes.md)
+  profile: standard
   createServiceAccounts: true
   readOnlyServiceAccount: ordivus-readonly   # plan, drift, scheduledDrift
-  applyServiceAccount: ordivus-apply         # apply
+  applyServiceAccount: ordivus-apply         # apply; muss sich vom readOnly-Namen unterscheiden
   serviceAccountAnnotations: {}
   networkPolicy:
     enabled: false
-    # Erlaubter Egress zusätzlich zu DNS (kube-system, Port 53).
+    dns:
+      # DNS nur zu diesen Pods (Port 53 UDP/TCP).
+      namespace: kube-system
+      podSelector: {k8s-app: kube-dns}
+      # Zusätzliche DNS-Ziele per IP, z. B. NodeLocal DNSCache: [169.254.20.10/32]
+      cidrs: []
+    # Erlaubter Egress zusätzlich zu DNS. Ohne except wird die Cloud-Metadaten-Adresse
+    # (169.254.169.254/32 bzw. fd00:ec2::254/128) ausgenommen, sofern sie im Block liegt.
     egress: []
     #  - cidr: 10.20.0.0/16
     #    ports: [5432, 8200]
+    #    except: []                 # optional, ersetzt die Standard-Ausnahmen
+
+# Optionale ValidatingAdmissionPolicy (Kubernetes >= 1.30): Pods mit dem Apply-ServiceAccount im
+# Apply-Namespace nur, wenn sie der Apply-Vorlage entsprechen. Grenzen: docs/kubernetes.md.
+admission:
+  enabled: false
 
 execution:
   timeoutSeconds: 1800              # activeDeadlineSeconds
@@ -77,11 +107,8 @@ execution:
 
 resources:
   requests: {cpu: 100m, memory: 128Mi}
-  limits: {cpu: 1000m, memory: 512Mi}
+  limits: {cpu: 1000m, memory: 512Mi, ephemeral-storage: 256Mi}
 
-env: []
-extraVolumes: []
-extraVolumeMounts: []
 nodeSelector: {}
 tolerations: []
 affinity: {}

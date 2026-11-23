@@ -57,6 +57,7 @@ log = logging.getLogger("ordivus")
 MODES = ("plan", "drift", "apply")
 MUTATING = (CREATE_SECRET, CREATE, UPDATE, DELETE, SET_PASSWORD)
 PASSWORD_POLICIES = ("verify", "enforce", "set-on-create")
+MAX_LENGTH = 1024  # Obergrenze für generierte Passwörter
 
 
 @dataclass
@@ -82,9 +83,15 @@ class Model:
     targets: dict[str, Target]
     credentials: dict[str, Credential]
     providers: dict[str, CredentialProvider]
+    known: list[Secret] = field(default_factory=list)  # alle in diesem Lauf gelesenen Secrets (Scrubbing)
 
 
 # --- Validierung ------------------------------------------------------------------------------
+
+def _ref(value) -> str | None:
+    """Referenzen sind Strings; alles andere (Listen, Mappings) gilt als nicht gefunden statt TypeError."""
+    return value if isinstance(value, str) else None
+
 
 def _unknown(spec: dict, allowed: set[str], where: str, prefix: str = "spec") -> list[str]:
     return [f"{where}: unknown field {prefix}.{k}" for k in spec if k not in allowed]
@@ -120,7 +127,8 @@ def _check_policy(spec: dict, target: Target, where: str) -> list[str]:
     if not isinstance(scope, dict):
         return [*errors, f"{where}: spec.scope must be a mapping"]
     resource_kinds = scope.get("resourceKinds", [])
-    if not isinstance(resource_kinds, list) or not set(resource_kinds) <= set(kinds):
+    if not isinstance(resource_kinds, list) or not all(isinstance(k, str) for k in resource_kinds) \
+            or not set(resource_kinds) <= set(kinds):
         errors.append(f"{where}: spec.scope.resourceKinds must be a list of {list(kinds)}")
     for key, value in scope.items():
         if key != "resourceKinds":
@@ -139,7 +147,7 @@ def _check_policy(spec: dict, target: Target, where: str) -> list[str]:
 
 def _check_credential(spec: dict, providers: dict, where: str) -> list[str]:
     errors = _unknown(spec, {"providerRef", "path", "lifecycle"}, where)
-    if spec.get("providerRef") not in providers:
+    if _ref(spec.get("providerRef")) not in providers:
         errors.append(f"{where}: unknown providerRef {spec.get('providerRef')!r}")
     if not isinstance(spec.get("path"), str) or not spec.get("path"):
         errors.append(f"{where}: spec.path must be a non-empty string")
@@ -152,8 +160,8 @@ def _check_credential(spec: dict, providers: dict, where: str) -> list[str]:
         return [*errors, f"{where}: spec.lifecycle.generator must be a mapping"]
     errors += _unknown(gen, {"length", "alphabet"}, where, "spec.lifecycle.generator")
     length = gen.get("length", 32)
-    if type(length) is not int or length < MIN_LENGTH:
-        errors.append(f"{where}: generator.length must be an integer >= {MIN_LENGTH}")
+    if type(length) is not int or not MIN_LENGTH <= length <= MAX_LENGTH:
+        errors.append(f"{where}: generator.length must be an integer between {MIN_LENGTH} and {MAX_LENGTH}")
     if gen.get("alphabet", "alphanumeric") not in ALPHABETS:
         errors.append(f"{where}: generator.alphabet must be one of {sorted(ALPHABETS)}")
     return errors
@@ -176,7 +184,7 @@ def prepare(docs: list[Document]) -> Model:
 
     providers, provider_docs = {}, {d.name for d in by_kind["CredentialProvider"]}
     for doc in by_kind["CredentialProvider"]:
-        cls = PROVIDERS.get(spec(doc).get("type"))
+        cls = PROVIDERS.get(_ref(spec(doc).get("type")))
         if cls is None:
             errors.append(f"{where(doc)}: spec.type must be one of {sorted(PROVIDERS)}")
             continue
@@ -189,7 +197,7 @@ def prepare(docs: list[Document]) -> Model:
     for doc in by_kind["Credential"]:
         problems = _check_credential(spec(doc), provider_docs, where(doc))
         errors += problems
-        credentials[doc.name] = Credential(doc.name, spec(doc), providers.get(spec(doc).get("providerRef")))
+        credentials[doc.name] = Credential(doc.name, spec(doc), providers.get(_ref(spec(doc).get("providerRef"))))
 
     targets, target_where = {}, {}
     for doc in by_kind["Target"]:
@@ -205,13 +213,13 @@ def prepare(docs: list[Document]) -> Model:
             errors.append(f"{where(doc)}: spec.authentication must be a mapping")
         else:
             errors += _unknown(auth, {"credentialRef"}, where(doc), "spec.authentication")
-            target.auth = auth.get("credentialRef")
-            if target.auth is not None and target.auth not in credentials:
-                errors.append(f"{where(doc)}: unknown credentialRef {target.auth!r}")
+            target.auth = _ref(auth.get("credentialRef"))
+            if auth.get("credentialRef") is not None and target.auth not in credentials:
+                errors.append(f"{where(doc)}: unknown credentialRef {auth.get('credentialRef')!r}")
         errors += [f"{where(doc)}: {p}" for p in adapter.validate(_strip(doc.data, ("adapter", "authentication")))]
 
     for doc in by_kind["ReconciliationPolicy"]:
-        target = targets.get(spec(doc).get("targetRef"))
+        target = targets.get(_ref(spec(doc).get("targetRef")))
         if target is None:
             errors.append(f"{where(doc)}: unknown targetRef {spec(doc).get('targetRef')!r}")
         elif target.adapter is not None:
@@ -221,7 +229,7 @@ def prepare(docs: list[Document]) -> Model:
             target.policy = spec(doc)
 
     for doc in by_kind["resource"]:
-        s, target = spec(doc), targets.get(spec(doc).get("targetRef"))
+        s, target = spec(doc), targets.get(_ref(spec(doc).get("targetRef")))
         if target is None:
             errors.append(f"{where(doc)}: unknown targetRef {s.get('targetRef')!r}")
             continue
@@ -239,7 +247,7 @@ def prepare(docs: list[Document]) -> Model:
                 errors.append(f"{where(doc)}: spec.credentials must be a mapping")
                 continue
             errors += _unknown(creds, {"credentialRef", "passwordPolicy"}, where(doc), "spec.credentials")
-            if creds.get("credentialRef") not in credentials:
+            if _ref(creds.get("credentialRef")) not in credentials:
                 errors.append(f"{where(doc)}: unknown credentialRef {creds.get('credentialRef')!r}")
             if creds.get("passwordPolicy", "verify") not in PASSWORD_POLICIES:
                 errors.append(f"{where(doc)}: passwordPolicy must be one of {list(PASSWORD_POLICIES)}")
@@ -274,9 +282,24 @@ def _discover(target: Target, session, kind: str) -> Discovery:
         return Discovery(FORBIDDEN, [], str(e))
     except AdapterError as e:
         return Discovery("unknown", [], f"{type(e).__name__}: {e}")
-    if found.status not in DISCOVERY_STATUSES:
-        return Discovery("unknown", [], f"adapter returned invalid status {found.status!r}")
+    except Exception as e:  # Adapter-Bug: Kind bleibt unbekannt, der Lauf geht weiter (Meldung wird zentral gescrubbt)
+        log.error("target %s: discovery of %s failed: %s: %s", target.name, kind, type(e).__name__, e)
+        return Discovery("unknown", [], f"internal error: {type(e).__name__}: {e}")
+    if not isinstance(found, Discovery) or found.status not in DISCOVERY_STATUSES:
+        return Discovery("unknown", [], "adapter returned an invalid discovery result")
     return found
+
+
+def _read(cred: Credential, known: list[Secret]) -> Secret:
+    return _nonempty(cred, cred.provider.read(cred.spec), known)
+
+
+def _nonempty(cred: Credential, value, known: list[Secret]) -> Secret:
+    """Leere Secrets nie verwenden: ein abgebrochenes Anlegen o. Ä. würde sonst ein leeres Passwort setzen."""
+    if not isinstance(value, Secret) or not value.reveal():
+        raise CredentialError(f"credential {cred.name!r} is empty or invalid")
+    known.append(value)
+    return value
 
 
 def _state(cred: Credential) -> State:
@@ -296,7 +319,12 @@ def _password_ops(target: Target, session, op: Op, model: Model, policy: Operato
     """Passwort-Operationen für eine deklarierte Ressource mit `spec.credentials` (§10.5, §10.6)."""
     cred = model.credentials[op.desired.password_ref]
     password_policy = target.password_policy[(op.kind, op.id)]
-    state, out = _state(cred), []
+    state, out, value = _state(cred), [], None
+    if state == PRESENT:  # früh lesen: ein unlesbarer oder leerer Wert ist "unknown", bevor etwas geplant wird
+        try:
+            value = _read(cred, model.known)
+        except (AdapterError, CredentialError) as e:
+            state = State(CRED_UNKNOWN, f"{type(e).__name__}: {e}")
     if state in (CRED_UNKNOWN, CONFLICT):  # conflict: nur manuell lösbar → BLOCKED statt UNKNOWN
         reason = state.reason or f"credential state {state}"
         cop = Op(target.name, "Credential", cred.name, UNKNOWN, reason=reason)
@@ -315,12 +343,13 @@ def _password_ops(target: Target, session, op: Op, model: Model, policy: Operato
         reset = True
     else:
         try:
-            equal = target.adapter.verify_password(session, target.spec, op.observed, cred.provider.read(cred.spec))
-        except (AdapterError, CredentialError) as e:
+            equal = target.adapter.verify_password(session, target.spec, op.observed, value)
+        except AdapterError as e:
             log.warning("%s %s: password check failed (%s)", op.kind, op.id, type(e).__name__)
             equal = None
         if equal is None:
-            out.append(Op(target.name, op.kind, op.id, UNKNOWN, observed=op.observed, reason="password unverifiable"))
+            out.append(Op(target.name, op.kind, op.id, UNKNOWN, desired=op.desired, observed=op.observed,
+                          reason="password unverifiable"))
         reset = equal is False
     if reset:
         p = Op(target.name, op.kind, op.id, SET_PASSWORD, desired=op.desired, observed=op.observed)
@@ -348,7 +377,7 @@ def reconcile(target: Target, found: dict[str, Discovery], model: Model, policy:
             if have is not None:
                 op.changes = {f: (have.attrs.get(f), v) for f, v in sorted(want.attrs.items())
                               if have.attrs.get(f) != v}
-            if blocked := target.adapter.check(session, want):
+            if blocked := target.adapter.check(session, want, policy.allowPrivilegedGrants):
                 op.action, op.status, op.reason = BLOCKED, "skipped", blocked
             elif have is None:
                 op.action, op.reason = (CREATE, "") if complete else (UNKNOWN, f"discovery {discovery.status}")
@@ -454,13 +483,33 @@ def _verify(target: Target, session, op: Op) -> bool:
 
 
 def _scrub(text: str, secrets: list[Secret]) -> str:
-    for s in secrets:
-        if s.reveal():
-            text = text.replace(s.reveal(), "<redacted>")
+    for value in sorted({s.reveal() for s in secrets if s.reveal()}, key=len, reverse=True):
+        text = text.replace(value, report.REDACTED)
     return text
 
 
-def _execute(target: Target, session, ops: list[Op], model: Model, known: list[Secret]) -> None:
+def _scrub_all(value, secrets: list[Secret]):
+    """Scrubbt jeden String im Report-Modell (Gründe aus Discovery, Providern, Adapter-Bugs …)."""
+    if isinstance(value, str):
+        return _scrub(value, secrets)
+    if isinstance(value, dict):
+        return {k: _scrub_all(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_all(v, secrets) for v in value]
+    return value
+
+
+class _ScrubFilter(logging.Filter):
+    def __init__(self, secrets: list[Secret]):
+        super().__init__()
+        self.secrets = secrets
+
+    def filter(self, record):
+        record.msg, record.args = _scrub(record.getMessage(), self.secrets), ()
+        return True
+
+
+def _execute(target: Target, session, ops: list[Op], model: Model) -> None:
     """Führt mutierende Ops der Reihe nach aus; nach einem Fehler werden die übrigen übersprungen."""
     created: dict[str, Secret] = {}
     failed = False
@@ -474,21 +523,19 @@ def _execute(target: Target, session, ops: list[Op], model: Model, known: list[S
             if op.action == CREATE_SECRET:
                 cred = model.credentials[op.id]
                 gen = cred.spec.get("lifecycle", {}).get("generator", {})
-                created[op.id] = cred.provider.create_if_absent(
-                    cred.spec, generate(gen.get("length", 32), gen.get("alphabet", "alphanumeric")))
-                known.append(created[op.id])
+                created[op.id] = _nonempty(cred, cred.provider.create_if_absent(
+                    cred.spec, generate(gen.get("length", 32), gen.get("alphabet", "alphanumeric"))), model.known)
                 op.status = "succeeded" if _state(cred) == PRESENT else "unverified"
                 continue
             ref = op.desired.password_ref if op.desired else None
             if ref and op.action in (CREATE, SET_PASSWORD):
                 cred = model.credentials[ref]
-                op.password = created.get(ref) or cred.provider.read(cred.spec)
-                known.append(op.password)
+                op.password = created.get(ref) or _read(cred, model.known)
             target.adapter.apply(session, op)
             op.status = "succeeded" if _verify(target, session, op) else "unverified"
         except Exception as e:  # jeder Fehler (auch Adapter-Bugs) stoppt dieses Target, nicht den Lauf
             failed, op.status = True, "failed"
-            op.reason = _scrub(f"{type(e).__name__}: {e}", known)
+            op.reason = f"{type(e).__name__}: {e}"  # Scrubbing zentral in run()
         finally:
             op.password = None
 
@@ -498,14 +545,9 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy)
     if target.adapter.insecure_transport(target.spec):
         info["insecureTransport"] = True
     ops: list[Op] = []
-    known: list[Secret] = []
+    write = mode == "apply"
     try:
-        secret = None
-        if target.auth:
-            cred = model.credentials[target.auth]
-            secret = cred.provider.read(cred.spec)
-            known.append(secret)
-        write = mode == "apply"
+        secret = _read(model.credentials[target.auth], model.known) if target.auth else None
         with target.adapter.connect(target.spec, secret, write) as session, \
                 (target.adapter.lock(session) if write else nullcontext()):
             found = {kind: _discover(target, session, kind) for kind in target.adapter.kinds}
@@ -513,10 +555,16 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy)
                                  if d.reason else {})} for k, d in found.items()}
             ops = reconcile(target, found, model, policy, session)
             if write:
-                _execute(target, session, ops, model, known)
-    except (AdapterError, CredentialError) as e:
-        info["reason"] = _scrub(f"{type(e).__name__}: {e}", known)
+                _execute(target, session, ops, model)
+    except Exception as e:  # auch Adapter-Bugs: dieses Target ist Fehler, die übrigen laufen weiter
+        expected = isinstance(e, AdapterError | CredentialError)
+        info["reason"] = f"{'' if expected else 'internal error: '}{type(e).__name__}: {e}"
         log.error("target %s: %s", target.name, info["reason"])
+        if write and any(o.status in ("succeeded", "unverified") for o in ops):
+            info["status"] = "partial"  # schon etwas geändert: Exit 14 statt 13
+        for o in ops:
+            if write and o.status == "planned":
+                o.status, o.reason = "skipped", "target aborted"
         return info, ops
     info["status"] = report.target_status(mode, info["inventory"], ops)
     return info, ops
@@ -528,9 +576,11 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
 
     Wirft ConfigError (Exit 12) und PolicyError (Exit 11) vor jeder Verbindung zu einem Target.
     """
-    assert mode in MODES
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
     policy = policy or OperatorPolicy()
     started = datetime.now(UTC)
+    digest = config.digest(docs)  # vor jeder Verbindung: nicht serialisierbare Configs scheitern ohne Mutation
     model = prepare(docs)
     names = sorted(model.targets)
     if only:
@@ -554,9 +604,13 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
                 raise PolicyError(f"target {name!r}: insecure transport (no TLS or no certificate verification) "
                                   "not permitted by operator policy requireTls")
             log.warning("target %s: insecure transport (no TLS or no certificate verification)", name)
-    targets, ops = [], []
-    for name in names:
-        info, target_ops = _run_target(mode, model.targets[name], model, policy)
-        targets.append(info)
-        ops += target_ops
-    return report.build(mode, started, datetime.now(UTC), config.digest(docs), targets, ops)
+    targets, ops, scrub = [], [], _ScrubFilter(model.known)
+    log.addFilter(scrub)
+    try:
+        for name in names:
+            info, target_ops = _run_target(mode, model.targets[name], model, policy)
+            targets.append(info)
+            ops += target_ops
+    finally:
+        log.removeFilter(scrub)
+    return _scrub_all(report.build(mode, started, datetime.now(UTC), digest, targets, ops), model.known)

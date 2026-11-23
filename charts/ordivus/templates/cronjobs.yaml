@@ -1,11 +1,5 @@
+{{- include "ordivus.validate" . }}
 {{- $v := .Values -}}
-{{- if eq $v.security.profile "hardened" }}
-{{- if not $v.image.digest }}{{ fail "security.profile=hardened requires image.digest" }}{{ end }}
-{{- if not (or $v.policy.configMap $v.policy.secret) }}{{ fail "security.profile=hardened requires policy.configMap or policy.secret" }}{{ end }}
-{{- if not $v.security.networkPolicy.enabled }}{{ fail "security.profile=hardened requires security.networkPolicy.enabled" }}{{ end }}
-{{- else if not (has $v.security.profile (list "development" "standard")) }}
-{{- fail "security.profile must be development, standard or hardened" }}
-{{- end }}
 {{- range $mode := list "plan" "drift" "apply" }}
 {{- $t := index $v.jobs.templates $mode }}
 {{- if $t.enabled }}

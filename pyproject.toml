@@ -9,14 +9,14 @@ description = "Stateless, declarative reconciliation engine for administrative c
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0,<7"]
 
 [project.optional-dependencies]
-postgresql = ["psycopg[binary]>=3.2"]
-mysql = ["PyMySQL>=1.1"]
-redis = ["redis>=5.0"]
+postgresql = ["psycopg[binary]>=3.2,<4"]
+mysql = ["PyMySQL>=1.1,<2"]
+redis = ["redis>=5.0,<9"]
 # clickhouse, arcadedb, openbao: HTTP via standard library, no extra needed
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8,<10", "ruff>=0.6,<1"]
 
 [project.scripts]
 ordivus = "ordivus.cli:main"

@@ -53,9 +53,25 @@ TABLES_QUERY = ("SELECT n.nspname, c.oid, c.relowner, a.grantee, a.privilege_typ
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "LEFT JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a ON true "
                 f"WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND {USER_SCHEMA}")
+
+
+def _chain(start: str) -> str:
+    """CTE ``up``: die Rolle ``start`` und alle Rollen, deren Mitglied sie (transitiv) ist; UNION bricht Zyklen."""
+    return ("WITH RECURSIVE up(oid) AS (SELECT oid FROM pg_roles WHERE rolname = " + start +
+            " UNION SELECT m.roleid FROM pg_auth_members m JOIN up ON m.member = up.oid) ")
+
+
+# Rollen, deren Mitglied die Ordivus-Anmeldung ist: Entzug/Löschen hieße Selbstaussperrung (nie pg_has_role:
+# für Superuser ist das für jede Rolle wahr)
+ADMIN_CHAIN = _chain("current_user") + "SELECT oid FROM up"
 ROLES_QUERY = ("SELECT r.oid, r.rolname, r.rolcanlogin, r.rolsuper, r.rolconnlimit, r.rolcreatedb, r.rolcreaterole, "
                "array(SELECT DISTINCT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid "
-               "WHERE m.member = r.oid ORDER BY 1), r.rolname = current_user FROM pg_roles r")
+               f"WHERE m.member = r.oid ORDER BY 1), r.rolname = current_user, r.oid IN ({ADMIN_CHAIN}) "
+               "FROM pg_roles r")
+# Rechte, die eine Mitgliedschaft in ``%s`` (transitiv) mitbringt
+PRIVILEGED_QUERY = _chain("%s") + ("SELECT r.oid, r.rolname, r.rolsuper, r.rolcreaterole, r.rolreplication, "
+                                   "r.rolbypassrls, r.rolname = current_user FROM pg_roles r JOIN up USING (oid)")
+RESERVED_SCHEMAS = ("pg_catalog", "information_schema")
 
 
 @dataclass
@@ -156,6 +172,9 @@ def _validate_resource(kind: str, spec: dict) -> list[str]:
             errors.append("spec.schema is not allowed with on: database")
         elif on != "database":
             errors += _name(spec.get("schema"), "spec.schema")
+            schema = spec.get("schema")
+            if isinstance(schema, str) and (schema in RESERVED_SCHEMAS or schema.startswith("pg_")):
+                errors.append(f"spec.schema {schema!r} is a system schema; grants on it are not supported")
         privileges = spec.get("privileges")
         if not isinstance(privileges, list) or not privileges:
             errors.append("spec.privileges must be a non-empty list")
@@ -273,7 +292,29 @@ class PostgreSQLAdapter(Adapter):
         return [(kind, parent) for parent in resource.attrs.get("memberOf", []) for kind in ROLE_KINDS]
 
     def insecure_transport(self, target):
-        return target["endpoint"].get("tls", {}).get("mode", "prefer") not in ("verify-ca", "verify-full")
+        # verify-ca prüft den Hostnamen nicht: jedes Zertifikat derselben CA wäre akzeptiert
+        return target["endpoint"].get("tls", {}).get("mode", "prefer") != "verify-full"
+
+    def check(self, session, resource, allow_privileged=False):
+        if resource.kind not in ROLE_KINDS:
+            return None
+        policy = "requires operator policy allowPrivilegedGrants"
+        if resource.attrs.get("createrole") and not allow_privileged:
+            return f"createrole is privileged; {policy}"
+        for parent in resource.attrs.get("memberOf", []):
+            if parent.startswith("pg_") and not allow_privileged:
+                return f"memberOf {parent!r}: predefined pg_* roles are privileged; {policy}"
+            with _mapped():
+                rows = session.conn.execute(PRIVILEGED_QUERY, (parent,)).fetchall()
+            for oid, name, superuser, createrole, replication, bypassrls, me in rows:
+                if me or oid == BOOTSTRAP_OID:  # auch mit Freigabe nie: Ordivus-Anmeldung, Bootstrap-Superuser
+                    return f"memberOf {parent!r} would grant the role {name!r} (Ordivus login or bootstrap superuser)"
+                why = [w for w, on in (("SUPERUSER", superuser), ("CREATEROLE", createrole),
+                                       ("REPLICATION", replication), ("BYPASSRLS", bypassrls),
+                                       ("predefined pg_* role", name.startswith("pg_"))) if on]
+                if why and not allow_privileged:
+                    return f"memberOf {parent!r} is privileged (via {name!r}: {', '.join(why)}); {policy}"
+        return None
 
     @contextmanager
     def connect(self, target, secret, write):
@@ -295,8 +336,9 @@ class PostgreSQLAdapter(Adapter):
                 return Discovery(COMPLETE, [
                     Resource(kind, n, {"memberOf": list(member_of), "connectionLimit": limit, "createdb": createdb,
                                        "createrole": createrole},
-                             manageable=not (superuser or me), system=oid == BOOTSTRAP_OID or n.startswith("pg_"))
-                    for oid, n, login, superuser, limit, createdb, createrole, member_of, me
+                             manageable=not (superuser or me),
+                             system=oid == BOOTSTRAP_OID or n.startswith("pg_") or admin_chain)
+                    for oid, n, login, superuser, limit, createdb, createrole, member_of, me, admin_chain
                     in session.conn.execute(ROLES_QUERY)
                     if login == (kind == "DatabaseUser") and _in_scope(scope, "roles", n)])
             databases = [n for (n,) in session.conn.execute(
@@ -335,7 +377,8 @@ class PostgreSQLAdapter(Adapter):
         grantee = sql.Identifier(attrs["grantee"])
 
         def privileges(names):  # nur Werte aus der Allowlist werden zu SQL
-            assert set(names) <= set(PRIVILEGES[on])
+            if not set(names) <= set(PRIVILEGES[on]):
+                raise PermanentError(f"invalid privileges for {on}")
             return sql.SQL(", ").join(sql.SQL(p) for p in names)
 
         with self._database(session, db, write=True) as conn, _mapped(), conn.transaction():
@@ -373,6 +416,7 @@ class PostgreSQLAdapter(Adapter):
 
 def _grants(conn, db: str, scope: dict | None) -> list[Resource]:
     names = dict(conn.execute("SELECT oid, rolname FROM pg_roles"))
+    admin = {oid for (oid,) in conn.execute(ADMIN_CHAIN)}  # Rechte der eigenen Anmeldung nie entziehen
     found, owners = defaultdict(set), {}
     for on, query in ACL_QUERIES.items():
         for schema, owner, grantee, privilege in conn.execute(query):
@@ -395,7 +439,8 @@ def _grants(conn, db: str, scope: dict | None) -> list[Resource]:
             continue
         attrs = {"grantee": name, "database": db, "on": on, **({"schema": schema} if schema else {}),
                  "privileges": sorted(privileges)}
-        system = grantee == BOOTSTRAP_OID or name.startswith("pg_") or grantee == owners.get((on, schema))
+        system = grantee == BOOTSTRAP_OID or name.startswith("pg_") or grantee == owners.get((on, schema)) \
+            or grantee in admin
         resources.append(Resource("Grant", _grant_id(attrs), attrs, system=system))
     return resources
 

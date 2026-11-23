@@ -11,8 +11,9 @@ Lifecycle per run and target:
 3. ``insecure_transport(target)`` before connecting; then ``connect(target, secret, write)``;
    in apply additionally ``lock(session)``.
 4. ``discover(session, kind, scope)`` once per kind in ``kinds``.
-5. Planning: ``check(session, resource)`` per desired resource, ``dependencies(resource)`` for
-   ordering, ``verify_password`` where a resource carries ``spec.credentials`` with policy ``verify``.
+5. Planning: ``check(session, resource, allow_privileged)`` per desired resource,
+   ``dependencies(resource)`` for ordering, ``verify_password`` where a resource carries
+   ``spec.credentials`` with policy ``verify``.
 6. apply only: ``apply(session, op)`` per operation, followed by ``discover`` again to verify.
 
 Rules every adapter must keep:
@@ -22,7 +23,7 @@ Rules every adapter must keep:
 - Never put secret values into exceptions, logs or attrs. ``Secret`` prints as ``***``.
 - Quote identifiers with the driver's quoting API; never build statements from raw strings.
 - Raise ``TransientError``/``PermanentError``/``AuthorizationError`` for target failures.
-  Any other exception is treated as an internal bug.
+  Any other exception is treated as an internal bug (reported as target error, the run continues).
 - Import optional drivers lazily (inside ``connect``) so a missing extra does not break
   loading of other adapters.
 - Register the class under the entry point group ``ordivus.adapters`` in ``pyproject.toml``.
@@ -174,9 +175,17 @@ class Adapter:
         The engine refuses such targets under operator policy ``requireTls``. Default False."""
         return False
 
-    def check(self, session, resource: Resource) -> str | None:
+    def check(self, session, resource: Resource, allow_privileged: bool = False) -> str | None:
         """Planning hook for a desired resource: a reason string makes its op ``BLOCKED`` (never
-        executed), e.g. a protected name that does not exist yet. Default None (allowed)."""
+        executed), e.g. a protected name that does not exist yet. Default None (allowed).
+
+        ``allow_privileged`` is the operator policy ``allowPrivilegedGrants`` (INV-10: the config must
+        not grant more than the operator allows). Without it, desired state that hands out
+        privileges the adapter defines as privileged (superuser roles, user/role administration,
+        file or server access, grant options, ...) must be blocked here. Protected/system objects and
+        the adapter's own login stay untouchable even when it is True. ``session`` is the read-only
+        or write session of the current run.
+        """
         return None
 
     def dependencies(self, resource: Resource) -> list[tuple[str, str]]:

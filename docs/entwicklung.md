@@ -36,11 +36,11 @@ Die Integrationstests laufen gegen echte Zielsysteme in Docker und werden übers
 | PostgreSQL | `postgres:17-alpine` | 15432 |
 | MySQL | `mysql:8.4` | 13306 |
 | ClickHouse | `clickhouse/clickhouse-server:25.8` | 18123 |
-| ArcadeDB | `arcadedata/arcadedb` | 12480 |
+| ArcadeDB | `arcadedata/arcadedb:26.12.1-SNAPSHOT` (per Digest gepinnt) | 12480 |
 | Redis | `redis:8-alpine` | 16379 |
-| OpenBao | `openbao/openbao` (dev mode) | 18200 |
+| OpenBao | `openbao/openbao:2.7.3` (per Digest gepinnt, dev mode) | 18200 |
 
-`scripts/test-containers.sh up` startet alle sechs Container mit den Test-Zugangsdaten, die die Tests erwarten; `scripts/test-containers.sh down` entfernt sie wieder. Mit `ORDIVUS_TEST_HOST` legen Sie fest, unter welchem Hostnamen die Container erreichbar sind (Standard `localhost`; `scripts/dev.sh` setzt die Gateway-Adresse des Docker-Bridge-Netzes).
+`scripts/test-containers.sh up` startet alle sechs Container mit den Test-Zugangsdaten, die die Tests erwarten; `scripts/test-containers.sh down` entfernt sie wieder. Mit `ORDIVUS_TEST_HOST` legen Sie fest, unter welchem Hostnamen die Container erreichbar sind (Standard `localhost`). Die Ports sind nur auf `127.0.0.1` veröffentlicht, nicht auf allen Schnittstellen; `scripts/dev.sh` startet seinen Container deshalb mit `--network host` und `ORDIVUS_TEST_HOST=127.0.0.1` (die Bridge-Gateway-Adresse lässt sich unter Docker Desktop nicht als Bind-Adresse verwenden, `host.docker.internal` ist langsam).
 
 Kubernetes-E2E gegen einen lokalen Cluster (z. B. Docker Desktop):
 
@@ -48,6 +48,17 @@ Kubernetes-E2E gegen einen lokalen Cluster (z. B. Docker Desktop):
 docker build -t ordivus:dev .
 ORDIVUS_E2E=1 tests/e2e/run.sh
 ```
+
+## Abhängigkeiten und Lock-Datei
+
+In `pyproject.toml` haben alle Abhängigkeiten eine Obergrenze unterhalb der nächsten Major-Version. Das Produktions-Image installiert ausschließlich aus `requirements.lock` (`pip install --require-hashes`, nur Wheels) und danach das Ordivus-Paket selbst mit `--no-deps`; auch das Build-Backend (setuptools) steht mit Hash im Lock. Nach jeder Änderung der Abhängigkeiten den Lock neu erzeugen und mitcommitten:
+
+```sh
+scripts/dev.sh sh -c 'pip install -q pip-tools && pip-compile -q --strip-extras --generate-hashes --all-build-deps \
+  --allow-unsafe --extra postgresql --extra mysql --extra redis --no-emit-index-url -o requirements.lock pyproject.toml'
+```
+
+Das Basis-Image ist im `Dockerfile` per Digest gepinnt (`ARG PYTHON_IMAGE`). Aktualisieren: `docker buildx imagetools inspect python:3.14-slim` und den Digest eintragen. Prüfen: `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.67.2 image --ignore-unfixed --severity HIGH,CRITICAL ordivus:dev`.
 
 ## Einen Adapter schreiben
 

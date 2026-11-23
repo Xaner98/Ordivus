@@ -16,8 +16,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from ordivus import net
 from ordivus.adapters.base import (
     COMPLETE,
     CREATE,
@@ -35,6 +36,18 @@ from ordivus.adapters.base import (
 )
 
 SYSTEM_DATABASES = frozenset({"system", "information_schema", "INFORMATION_SCHEMA", "default"})
+GRANT_FORBIDDEN_DATABASES = SYSTEM_DATABASES - {"default"}  # Grants dort wären für scoped Discovery unsichtbar
+# Expandieren serverseitig (CURRENT GRANTS = alle eigenen Rechte des Admins); immer abgelehnt
+EXPANDING = frozenset({"ALL", "ALL PRIVILEGES", "NONE", "USAGE", "NO PRIVILEGES", "CURRENT GRANTS"})
+# Privilegiert (allowPrivilegedGrants): diese Gruppen samt allen Unterrechten laut system.privileges.parent_group,
+# außerdem jedes direkte Kind von ALL auf Ebene GLOBAL (Quellen FILE/URL/S3/…, KILL QUERY, CLUSTER …)
+# und jedes Recht auf den Ebenen SOURCE/USER_NAME/NAMED_COLLECTION/DEFINER.
+PRIVILEGED_GROUPS = frozenset({
+    "ACCESS MANAGEMENT", "SYSTEM", "SOURCES", "READ", "WRITE", "INTROSPECTION", "DISPLAYSECRETSINSHOWANDSELECT",
+    "KILL QUERY", "KILL TRANSACTION", "NAMED COLLECTION ADMIN", "SET DEFINER", "CLUSTER", "TABLE ENGINE",
+    "MOVE PARTITION BETWEEN SHARDS", "CREATE FUNCTION", "DROP FUNCTION"})
+PRIVILEGED_LEVELS = frozenset({"SOURCE", "USER_NAME", "NAMED_COLLECTION", "DEFINER"})
+HOST_FORBIDDEN = re.compile(r"[/@?#\\\[\]\s]")
 SQL_STORAGES = frozenset({"local_directory", "replicated"})  # alles andere (users_xml …) ist nicht per SQL änderbar
 AUTH_FAILED = 516
 AUTH_CODES = frozenset({497, 516, 192})  # ACCESS_DENIED, AUTHENTICATION_FAILED, UNKNOWN_USER
@@ -76,6 +89,8 @@ class Session:
     context: ssl.SSLContext | None
     timeout: float
     write: bool
+    include: list[str] | None = None  # scope.databases.include
+    cache: dict = field(default_factory=dict)  # Lookups je Lauf (system.privileges, Rollen des Admins)
 
 
 def _error(status: int, code: str | None, text: str) -> Exception:
@@ -100,11 +115,11 @@ def _post(s: Session, sql: str, secret: bool = False) -> list[dict]:
                                  headers={"Authorization": f"Basic {auth}"})
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=s.timeout, context=s.context) as resp:
-                body = resp.read()
+            with net.urlopen(req, s.timeout, s.context) as resp:
+                body = net.read(resp)
             break
         except urllib.error.HTTPError as e:
-            text = "" if secret else (e.read().decode(errors="replace").strip().splitlines() or [""])[0][:300]
+            text = "" if secret else (net.read(e).decode(errors="replace").strip().splitlines() or [""])[0][:300]
             raise _error(e.code, e.headers.get("X-ClickHouse-Exception-Code"), text) from None
         except urllib.error.URLError as e:
             # URLError: Aufbau/Senden gescheitert, Anfrage kam nie vollständig an, Wiederholen ist sicher
@@ -168,8 +183,9 @@ class ClickHouseAdapter(Adapter):
                 return [*errors, "spec.endpoint must be a mapping"]
             errors += [f"unknown field spec.endpoint.{k}" for k in endpoint
                        if k not in {"host", "port", "user", "tls", "timeoutSeconds"}]
-            if not isinstance(endpoint.get("host"), str) or not endpoint.get("host"):
-                errors.append("spec.endpoint.host must be a non-empty string")
+            host = endpoint.get("host")
+            if not isinstance(host, str) or not host or HOST_FORBIDDEN.search(host):
+                errors.append("spec.endpoint.host must be a host name or IP address (no '/', '@', '?', '#', spaces)")
             if "port" in endpoint and (type(endpoint["port"]) is not int or not 0 < endpoint["port"] < 65536):
                 errors.append("spec.endpoint.port must be an integer 1..65535")
             user = endpoint.get("user", "default")
@@ -215,7 +231,7 @@ class ClickHouseAdapter(Adapter):
                 errors.append("spec.privileges must be a non-empty list of strings")
             else:
                 for p in map(privilege, privileges):
-                    if p in ("ALL", "ALL PRIVILEGES", "NONE"):
+                    if p in EXPANDING:
                         errors.append(f"spec.privileges: {p} expands server-side; list privileges explicitly")
                     elif not PRIVILEGE.fullmatch(p):
                         errors.append(f"spec.privileges: invalid privilege {p!r}")
@@ -224,6 +240,8 @@ class ClickHouseAdapter(Adapter):
                     errors.append(f"spec.{key} must be a non-empty string")
             if "table" in spec and "database" not in spec:
                 errors.append("spec.table requires spec.database")
+            if spec.get("database") in GRANT_FORBIDDEN_DATABASES:
+                errors.append(f"spec.database: grants on system database {spec['database']!r} are not supported")
         return errors
 
     def desired(self, doc):
@@ -248,14 +266,110 @@ class ClickHouseAdapter(Adapter):
     @contextmanager
     def connect(self, target, secret, write):
         session = _session(target, target["endpoint"].get("user", "default"), secret, write)
+        session.include = ((target.get("scope") or {}).get("databases") or {}).get("include")
         session.user = _post(session, "SELECT currentUser() AS u FORMAT JSON")[0]["u"]  # Selbstschutz: echter Name
         yield session
+
+    # --- Rechte-Prüfung (INV-10) ---------------------------------------------------------------
+
+    @staticmethod
+    def _in_scope(session, db) -> bool:
+        """Mit ``scope.databases`` gehören globale Grants (``db is None``) nicht zum Scope."""
+        if session.include is None:
+            return True
+        return db is not None and any(fnmatch.fnmatchcase(db, g) for g in session.include)
+
+    @staticmethod
+    def _privileges(session) -> tuple[dict, dict, dict]:
+        """(Name/Alias → kanonisch, kanonisch → Elterngruppe, kanonisch → Ebene) aus system.privileges."""
+        if "privileges" not in session.cache:
+            names, parent, level = {}, {}, {}
+            rows = _post(session, "SELECT privilege, aliases, level, parent_group FROM system.privileges FORMAT JSON")
+            for r in rows:
+                canon = privilege(r["privilege"])
+                for n in (r["privilege"], *r["aliases"]):
+                    names[privilege(n)] = canon
+                parent[canon] = privilege(r["parent_group"]) if r["parent_group"] else None
+                level[canon] = r["level"]
+            session.cache["privileges"] = names, parent, level
+        return session.cache["privileges"]
+
+    def _privileged(self, session, name: str) -> bool | None:
+        """True/False; None = ClickHouse kennt das Recht nicht."""
+        names, parent, level = self._privileges(session)
+        canon = names.get(privilege(name))
+        if canon is None:
+            return None
+        node, seen = canon, set()
+        while node is not None and node not in seen:
+            seen.add(node)
+            if node in PRIVILEGED_GROUPS or level.get(node) in PRIVILEGED_LEVELS or (
+                    parent.get(node) == "ALL" and level.get(node) == "GLOBAL"):
+                return True
+            node = parent.get(node)
+        return False
+
+    @staticmethod
+    def _closure(edges: dict, start) -> set:
+        out, todo = set(), list(start)
+        while todo:
+            role = todo.pop()
+            if role not in out:
+                out.add(role)
+                todo += edges.get(role, [])
+        return out
+
+    def _roles(self, session) -> tuple[set, set]:
+        """(Rollen des Admins transitiv, Rollen mit privilegierten Rechten transitiv)."""
+        if "roles" not in session.cache:
+            edges, admin = {}, []  # Rolle/Benutzer → direkt vergebene Rollen
+            for g in _post(session, "SELECT user_name, role_name, granted_role_name FROM system.role_grants "
+                                    "FORMAT JSON"):
+                if g["user_name"] == session.user:
+                    admin.append(g["granted_role_name"])
+                elif g["role_name"] is not None:
+                    edges.setdefault(g["role_name"], []).append(g["granted_role_name"])
+            strong = {r["role_name"] for r in _post(
+                session, "SELECT role_name, access_type, database, grant_option FROM system.grants "
+                         "WHERE role_name IS NOT NULL FORMAT JSON")
+                if r["database"] is None or r["grant_option"]
+                or self._privileged(session, r["access_type"]) is not False}
+            powerful = {role for role in edges.keys() | strong if self._closure(edges, [role]) & strong}
+            session.cache["roles"] = self._closure(edges, admin), powerful
+        return session.cache["roles"]
+
+    def check(self, session, resource, allow_privileged=False):
+        attrs = resource.attrs
+        if resource.kind in ("Database", "Grant"):
+            db = resource.id if resource.kind == "Database" else attrs["database"]
+            if not self._in_scope(session, db):
+                return "global grant (*.*) is outside spec.scope.databases" if db is None else \
+                    f"database {db!r} is outside spec.scope.databases"
+        admin_roles, powerful = self._roles(session)
+        if resource.kind == "Grant":
+            if attrs["grantee"] == session.user or attrs["grantee"] in admin_roles:
+                return f"grantee {attrs['grantee']!r} is the Ordivus login or one of its roles (protected)"
+            unknown = [p for p in attrs["privileges"] if self._privileged(session, p) is None]
+            if unknown:
+                return f"unknown privilege(s) {', '.join(unknown)}"
+            if allow_privileged:
+                return None
+            found = [p for p in attrs["privileges"] if self._privileged(session, p)]
+            if attrs["database"] is None:
+                found.insert(0, "global grant on *.*")
+            return f"privileged ({', '.join(found)}) requires operator policy allowPrivilegedGrants" if found else None
+        if resource.kind == "DatabaseUser":
+            strong = (set(attrs.get("roles", [])) | set(attrs.get("defaultRoles", []))) & (powerful | admin_roles)
+            if strong and not allow_privileged:
+                return (f"role(s) {', '.join(sorted(strong))} carry privileged grants or belong to the Ordivus "
+                        "login; requires operator policy allowPrivilegedGrants")
+        return None
 
     def discover(self, session, kind, scope):
         include = ((scope or {}).get("databases") or {}).get("include")
 
         def in_scope(db):
-            return db is None or include is None or any(fnmatch.fnmatchcase(db, g) for g in include)
+            return include is None or (db is not None and any(fnmatch.fnmatchcase(db, g) for g in include))
 
         if kind == "Database":
             rows = _post(session, "SELECT name, engine FROM system.databases FORMAT JSON")
@@ -267,8 +381,9 @@ class ClickHouseAdapter(Adapter):
                      "FORMAT JSON")}
         if kind == "DatabaseRole":
             rows = _post(session, "SELECT name, storage FROM system.roles FORMAT JSON")
-            return Discovery(COMPLETE, [Resource(kind, r["name"], manageable=r["storage"] in SQL_STORAGES)
-                                        for r in rows])
+            admin_roles = self._roles(session)[0]
+            return Discovery(COMPLETE, [Resource(kind, r["name"], manageable=r["storage"] in SQL_STORAGES,
+                                                 system=r["name"] in admin_roles) for r in rows])
         if kind == "DatabaseUser":
             grants = _post(session, "SELECT user_name, granted_role_name, granted_role_is_default "
                                     "FROM system.role_grants WHERE user_name IS NOT NULL FORMAT JSON")
@@ -288,6 +403,7 @@ class ClickHouseAdapter(Adapter):
         rows = _post(session, "SELECT user_name, role_name, access_type, database, table, column, is_partial_revoke, "
                               "grant_option FROM system.grants FORMAT JSON")
         groups: dict[str, Resource] = {}
+        protected = {session.user, *self._roles(session)[0]}  # Selbstaussperrung: eigene Rollen nie ändern
         for r in rows:
             if not in_scope(r["database"]):
                 continue
@@ -301,7 +417,7 @@ class ClickHouseAdapter(Adapter):
                 rid += f" ({', '.join(special)})"
             have = groups.setdefault(rid, Resource(
                 kind, rid, {"grantee": grantee, "database": r["database"], "table": r["table"], "privileges": []},
-                manageable=not special and storage.get(grantee) in SQL_STORAGES, system=grantee == session.user))
+                manageable=not special and storage.get(grantee) in SQL_STORAGES, system=grantee in protected))
             have.attrs["privileges"] = sorted({*have.attrs["privileges"], privilege(r["access_type"])})
         return Discovery(COMPLETE, list(groups.values()))
 
@@ -310,6 +426,10 @@ class ClickHouseAdapter(Adapter):
             raise PermanentError("read-only session")
         if op.observed is not None and (op.observed.system or not op.observed.manageable or op.id == session.user):
             raise PermanentError(f"{op.kind} {op.id!r} is protected or not manageable")
+        if op.kind in ("Database", "Grant"):  # zweite Sperre neben check(): nie außerhalb des Scopes schreiben
+            db = op.id if op.kind == "Database" else (op.desired or op.observed).attrs["database"]
+            if not self._in_scope(session, db):
+                raise PermanentError(f"{op.kind} {op.id!r} is outside spec.scope.databases")
         noun = {"Database": "DATABASE", "DatabaseRole": "ROLE", "DatabaseUser": "USER"}.get(op.kind)
         if op.action == DELETE:
             if op.kind == "Grant":

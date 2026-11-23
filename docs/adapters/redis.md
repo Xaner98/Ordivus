@@ -136,6 +136,21 @@ Jede Regel geht als eigenes Argument an `ACL SETUSER` (kein Zusammenbauen von St
 gelöscht; deklariert → `BLOCKED`. Der Adapter verweigert Änderungen an ihnen auch
 direkt.
 
+## Privilegierte Rechte (`allowPrivilegedGrants`)
+
+Privilegiert ist jeder Befehl (auch Subcommand) der Redis-Kategorien **`@admin`** und
+**`@dangerous`**, wie der Server sie per `ACL CAT admin` / `ACL CAT dangerous` meldet – u. a.
+`config`, `acl`, `module`, `debug`, `shutdown`, `monitor`, `replicaof`/`slaveof`, `save`/`bgsave`,
+`flushall`/`flushdb`, `keys`, `sort`, `migrate`, `restore`, `cluster …`, `client kill`. Ordivus wertet
+die deklarierten `commands` in Reihenfolge aus (wie Redis); erlauben sie danach einen dieser Befehle,
+ist die Ressource ohne `allowPrivilegedGrants: true` `BLOCKED`. Das gilt für `+@all`/`allcommands`,
+`+@admin`, `+@dangerous`, einzelne Befehle wie `+config` und auch für Kategorien, die solche Befehle
+enthalten: `+@read` erlaubt `keys` und ist damit privilegiert, `+@read +@write -@dangerous` nicht.
+
+Gesperrt werden nur **hinzukommende** Rechte: Hat ein bestehender Benutzer einen privilegierten
+Befehl schon, blockiert dessen Beibehaltung nicht. Nicht deklarierte Admin-Benutzer bleiben
+`UNMANAGED`. Lässt sich `ACL CAT` nicht lesen, ist die Ressource ebenfalls `BLOCKED`.
+
 ## Benötigte Rechte
 
 Der Admin-Benutzer braucht mindestens:

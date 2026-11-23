@@ -57,7 +57,8 @@ nicht erneuert (Läufe sind kurz; TTL der Rolle entsprechend wählen). Tokens st
 | Beobachtung | Zustand |
 |---|---|
 | `GET <mount>/metadata/<path>` = 200, aktuelle Version weder gelöscht noch zerstört | `present` |
-| Metadata 404 **und** `sys/capabilities-self` bestätigt `read` auf `<mount>/metadata/<path>` **und** `<mount>/data/<path>` | `absent` |
+| Metadata 404, `sys/internal/ui/mounts/<mount>` bestätigt KV v2 **und** `sys/capabilities-self` bestätigt `read` auf `<mount>/metadata/<path>` **und** `<mount>/data/<path>` | `absent` |
+| Metadata 404 auf einem KV-v1-Mount oder Mount-Typ nicht feststellbar | `unknown` |
 | Metadata 404 ohne bestätigtes Leserecht auf beiden Pfaden | `unknown` |
 | 403, 401, 5xx, Timeout, Netzwerk-/TLS-Fehler | `unknown` |
 | Metadata 200, aktuelle Version gelöscht (`deletion_time`) oder zerstört | `conflict` |

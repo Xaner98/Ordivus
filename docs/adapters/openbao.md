@@ -34,7 +34,7 @@ metadata:
   name: analytics-readonly
 spec:
   targetRef: security-openbao
-  policyName: analytics-readonly     # Schlüssel; nur Kleinbuchstaben (OpenBao normalisiert Namen)
+  policyName: analytics-readonly     # Schlüssel; [a-z0-9][a-z0-9_.-]* (OpenBao trimmt und kleinschreibt Namen)
   rules:
     - path: secret/data/analytics/*
       capabilities: [read]
@@ -68,6 +68,10 @@ Nie geändert oder gelöscht werden:
 - alle Namen aus `protectedPolicies` (z. B. Break-Glass- und Ordivus-eigene Policies),
 - alle Policies des verwendeten Tokens (`GET auth/token/lookup-self`: `policies` und
   `identity_policies`) – Ordivus kann sich so weder neue Rechte geben noch aussperren.
+
+OpenBao entfernt Leerraum am Rand und schreibt Namen klein (`" Default"` ist `default`). Deshalb
+muss `policyName` schon in Normalform `[a-z0-9][a-z0-9_.-]*` vorliegen (sonst Config-Fehler), und
+`protectedPolicies` wird vor jedem Vergleich ebenso normalisiert (`Break-Glass` schützt `break-glass`).
 
 Deklariert → `BLOCKED` (auch ohne Abweichung und auch, wenn sie noch nicht existiert); nicht
 deklariert → `IGNORE`, auch im authoritative Mode. `apply` endet dann mit Exit-Code 11; die übrigen

@@ -17,12 +17,12 @@ def ep(**endpoint):
 @pytest.mark.parametrize("adapter, spec, insecure", [
     (PostgreSQLAdapter, ep(), True),  # Default prefer
     (PostgreSQLAdapter, ep(tls={"mode": "require"}), True),
-    (PostgreSQLAdapter, ep(tls={"mode": "verify-ca"}), False),
+    (PostgreSQLAdapter, ep(tls={"mode": "verify-ca"}), True),  # ohne Hostnamenprüfung
     (PostgreSQLAdapter, ep(tls={"mode": "verify-full"}), False),
     (MySQLAdapter, ep(), False),  # Default verify-full
     (MySQLAdapter, ep(tls={"mode": "require"}), True),
     (MySQLAdapter, ep(tls={"mode": "disable"}), True),
-    (MySQLAdapter, ep(tls={"mode": "verify-ca"}), False),
+    (MySQLAdapter, ep(tls={"mode": "verify-ca"}), True),
     (ClickHouseAdapter, ep(), True),
     (ClickHouseAdapter, ep(tls={}), False),
     (ArcadeDBAdapter, ep(), True),

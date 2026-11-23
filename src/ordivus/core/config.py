@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+import os
 import re
-from collections.abc import Hashable
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +46,10 @@ class _Loader(yaml.SafeLoader):
     """SafeLoader mit YAML-1.2-Core-Schema: `no`/`on`/`0777`/`1:30`/Daten bleiben ohne Falle."""
 
     yaml_implicit_resolvers = {}  # PyYAMLs 1.1-Resolver vollständig verwerfen
+    # Nur JSON-kompatible Typen: !!timestamp/!!set/!!binary/!!omap/!!pairs werden zu "unknown tag"-Fehlern
+    yaml_constructors = {t: c for t, c in yaml.SafeLoader.yaml_constructors.items()
+                         if t is None or t.removeprefix("tag:yaml.org,2002:") in ("null", "bool", "int", "float",
+                                                                                 "str", "seq", "map")}
 
     def compose_node(self, parent, index):
         # Aliase werden abgelehnt: verhindert Expansion-Bomben ("billion laughs") und
@@ -58,8 +63,8 @@ class _Loader(yaml.SafeLoader):
         seen = set()
         for key_node, _ in node.value:
             key = self.construct_object(key_node, deep=deep)
-            if not isinstance(key, Hashable):
-                break  # super() meldet unhashbare Schlüssel selbst
+            if not isinstance(key, str):  # JSON kennt nur String-Schlüssel; Digest sortiert Schlüssel
+                raise yaml.MarkedYAMLError(None, None, "mapping keys must be strings", key_node.start_mark)
             if key in seen:
                 raise yaml.MarkedYAMLError(
                     None, None, f"duplicate key {key!r}", key_node.start_mark
@@ -94,12 +99,25 @@ def _files(path: Path) -> list[Path]:
     return [path]
 
 
-def _parse_file(path: Path) -> list[Document]:
-    if path.stat().st_size > MAX_FILE_BYTES:
+def _read(path: Path) -> bytes:
+    """Nur reguläre Dateien, höchstens MAX_FILE_BYTES; O_NONBLOCK, damit ein FIFO nicht hängt."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as e:
+        raise ConfigError([f"{path}: cannot open: {e.strerror}"]) from None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ConfigError([f"{path}: not a regular file"])
+        data = f.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
         raise ConfigError([f"{path}: file exceeds {MAX_FILE_BYTES} bytes"])
+    return data
+
+
+def _parse_file(path: Path) -> list[Document]:
     # JSON ist eine Teilmenge von YAML 1.2; ein Parser liefert Zeilennummern für beide Formate.
     try:
-        text = path.read_text(encoding="utf-8")
+        text = _read(path).decode("utf-8")
     except UnicodeDecodeError as e:
         raise ConfigError([f"{path}: not valid UTF-8: {e}"]) from None
     loader = _Loader(text)
@@ -114,6 +132,8 @@ def _parse_file(path: Path) -> list[Document]:
         raise ConfigError([f"{path}:{e.problem_mark.line + 1}: {e.problem}"]) from None
     except yaml.YAMLError as e:
         raise ConfigError([f"{path}: {e}"]) from None
+    except RecursionError:
+        raise ConfigError([f"{path}: nesting too deep"]) from None
     finally:
         loader.dispose()
     return [d for d in docs if d.data is not None]  # leere Dokumente (z. B. trailing ---)

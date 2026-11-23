@@ -12,12 +12,14 @@ class PolicyError(Exception):
 
 @dataclass(frozen=True)
 class OperatorPolicy:
-    """Ohne Policy-Datei: alle Targets, nur additive, kein Delete, Passwort-Reset erlaubt, TLS empfohlen."""
+    """Ohne Policy-Datei: alle Targets, nur additive, kein Delete, Passwort-Reset erlaubt, keine privilegierten
+    Rechte, TLS empfohlen."""
 
     allowTargets: tuple[str, ...] = ("*",)
     allowAuthoritative: bool = False
     allowDelete: bool = False
     allowPasswordReset: bool = True
+    allowPrivilegedGrants: bool = False  # INV-10: Config darf nicht mehr Rechte vergeben, als der Operator erlaubt
     profile: str = "standard"
     requireTls: bool = False
 
@@ -40,7 +42,7 @@ def load(path: str | Path) -> OperatorPolicy:
     targets = data.get("allowTargets", ["*"])
     if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
         errors.append(f"{path}: allowTargets must be a list of strings")
-    for key in ("allowAuthoritative", "allowDelete", "allowPasswordReset", "requireTls"):
+    for key in ("allowAuthoritative", "allowDelete", "allowPasswordReset", "allowPrivilegedGrants", "requireTls"):
         if not isinstance(data.get(key, False), bool):
             errors.append(f"{path}: {key} must be a boolean")
     if data.get("profile", "standard") not in ("development", "standard"):

@@ -45,6 +45,8 @@ def target_status(mode: str, inventory: dict, ops: list[Op]) -> str:
     if mode == "apply":
         if any(o.status in ("failed", "unverified", "skipped") and o.action in ACTIONABLE for o in ops):
             return "partial"
+        if any(o.action == UNKNOWN and o.desired is not None for o in ops):
+            return "incomplete"  # deklarierte Ressource weder angelegt noch geprüft: nie "in_sync"
         return "applied" if any(o.status == "succeeded" for o in ops) else "in_sync"
     if any(o.action in ACTIONABLE or o.action == BLOCKED for o in ops):
         return "drift_detected"
@@ -80,11 +82,13 @@ def build(mode, started, finished, digest: str, targets: list[dict], ops: list[O
 
 
 def exit_code(report: dict, fail_on: str | None = None) -> int:
-    """14 Teilausführung > 13 Target/Credential > 11 Policy-Verweigerung > 10 Schwelle > 0."""
+    """14 Teilausführung > 13 Target/Credential/Sichtbarkeit > 11 Policy-Verweigerung > 10 Schwelle > 0."""
     ops, summary, apply = report["operations"], report["summary"], report["run"]["mode"] == "apply"
-    if summary["failed"] or summary["unverified"]:
+    statuses = {t["status"] for t in report["targets"]}
+    if summary["failed"] or summary["unverified"] or (apply and "partial" in statuses):
         return 14
-    if summary["targetErrors"] or (apply and any(o["kind"] == "Credential" and o["action"] == UNKNOWN for o in ops)):
+    if summary["targetErrors"] or (apply and ("incomplete" in statuses or any(
+            o["kind"] == "Credential" and o["action"] == UNKNOWN for o in ops))):
         return 13
     # BLOCKED gibt es in apply nur an deklarierten Ressourcen (Authoritative-Verbot bricht vorher ab)
     if apply and any(o["status"] == "denied" or o["action"] == BLOCKED for o in ops):
@@ -95,7 +99,8 @@ def exit_code(report: dict, fail_on: str | None = None) -> int:
         "changes": summary["actionableDrift"] > 0,
         "actionable": summary["actionableDrift"] > 0,
         "unmanaged": summary["actionableDrift"] + actions[UNMANAGED] + actions[UNDESIRABLE] > 0,
-        "any": any(o["action"] != NOOP for o in ops),
+        "unknown": actions[UNKNOWN] > 0 or "incomplete" in statuses,
+        "any": any(o["action"] != NOOP for o in ops) or "incomplete" in statuses,
     }[fail_on]
     return 10 if exceeded else 0
 

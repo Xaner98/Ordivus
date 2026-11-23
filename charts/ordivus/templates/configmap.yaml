@@ -1,10 +1,14 @@
 {{- if eq .Values.configuration.source "inline" }}
+{{- range $ns := include "ordivus.namespaces" . | fromJsonArray }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Release.Name }}-configuration
+  name: {{ printf "%s-configuration" $.Release.Name | quote }}
+  namespace: {{ $ns | quote }}
   labels:
-    {{- include "ordivus.labels" . | nindent 4 }}
+    {{- include "ordivus.labels" $ | nindent 4 }}
 data:
-  {{- required "configuration.files must not be empty for configuration.source=inline" .Values.configuration.files | toYaml | nindent 2 }}
+  {{- required "configuration.files must not be empty for configuration.source=inline" $.Values.configuration.files | toYaml | nindent 2 }}
+{{- end }}
 {{- end }}
