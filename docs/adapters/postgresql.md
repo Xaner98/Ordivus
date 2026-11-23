@@ -1,15 +1,15 @@
-# PostgreSQL-Adapter
+# PostgreSQL adapter
 
-Verwaltet Rollen, Benutzer, Datenbanken und eine robuste Teilmenge von Grants in PostgreSQL
-(getestet mit PostgreSQL 17). Installation: `pip install 'ordivus[postgresql]'` (psycopg ≥ 3.2).
+Manages roles, users, databases and a robust subset of grants in PostgreSQL
+(tested with PostgreSQL 17). Installation: `pip install 'ordivus[postgresql]'` (psycopg ≥ 3.2).
 
-Kinds in Ausführungsreihenfolge: `DatabaseRole`, `DatabaseUser`, `Database`, `Grant`. Löschungen
-laufen umgekehrt (Grants, dann Datenbanken, dann Benutzer und Rollen). Rollen kommen vor Datenbanken,
-weil `CREATE DATABASE … OWNER` die Rolle bereits braucht. Innerhalb davon folgt die Reihenfolge
-`memberOf`: eine Elternrolle (auch ein `DatabaseUser`) entsteht vor ihren Mitgliedern, gelöscht wird
-umgekehrt. Zyklische Mitgliedschaften werden `BLOCKED`.
+Kinds in execution order: `DatabaseRole`, `DatabaseUser`, `Database`, `Grant`. Deletions
+run in reverse (grants, then databases, then users and roles). Roles come before databases
+because `CREATE DATABASE … OWNER` already needs the role. Within that, the order follows
+`memberOf`: a parent role (including a `DatabaseUser`) is created before its members and deleted
+after them. Cyclic memberships become `BLOCKED`.
 
-Vollständiges Beispiel: [`examples/postgresql/`](../../examples/postgresql/ordivus.yaml).
+Complete example: [`examples/postgresql/`](../../examples/postgresql/ordivus.yaml).
 
 ## Target
 
@@ -23,33 +23,33 @@ spec:
   endpoint:
     host: postgres.data-platform.svc.cluster.local
     port: 5432               # Default 5432
-    database: postgres       # Verbindungsdatenbank, Default "postgres"
-    user: ordivus_admin      # Pflicht: Rolle, als die Ordivus sich anmeldet
+    database: postgres       # Connection database, default "postgres"
+    user: ordivus_admin      # Required: role Ordivus logs in as
     tls:
-      mode: verify-full      # disable | allow | prefer (libpq-Default) | require | verify-ca | verify-full
+      mode: verify-full      # disable | allow | prefer (libpq default) | require | verify-ca | verify-full
       caFile: /trust/ca.pem  # → sslrootcert
   authentication:
-    credentialRef: postgres-admin   # Passwort von endpoint.user
+    credentialRef: postgres-admin   # Password of endpoint.user
   scope:
     databases:
-      include: ["analytics", "reporting_*"]   # Globs; ohne Angabe: alle Datenbanken
+      include: ["analytics", "reporting_*"]   # Globs; if omitted: all databases
     roles:
-      include: ["analytics_*"]                # gilt für DatabaseRole, DatabaseUser und Grant-Empfänger
+      include: ["analytics_*"]                # applies to DatabaseRole, DatabaseUser and grant recipients
 ```
 
-Für Produktion `tls.mode: verify-full` mit einer `caFile` aus der Laufzeitumgebung verwenden: Ein
-umgeleiteter Host scheitert dann am Zertifikat, bevor das Passwort gesendet wird. Jeder andere Modus
-als `verify-full` (auch der Default `prefer`) gilt als unsichere Verbindung: Warnung und
-`insecureTransport: true` im Report, mit Operator Policy `requireTls: true` Abbruch (Exit-Code 11).
-Auch `verify-ca` zählt als unsicher: Es prüft die CA, aber nicht den Hostnamen, akzeptiert also jedes
-Zertifikat derselben CA (z. B. das eines anderen Servers).
+For production, use `tls.mode: verify-full` with a `caFile` from the runtime environment: a
+redirected host then fails on the certificate before the password is sent. Any mode other
+than `verify-full` (including the default `prefer`) counts as an insecure connection: warning and
+`insecureTransport: true` in the report, abort with operator policy `requireTls: true` (exit code 11).
+`verify-ca` also counts as insecure: it checks the CA but not the hostname, so it accepts any
+certificate from the same CA (e.g. that of another server).
 
-## Kind `DatabaseRole` und `DatabaseUser`
+## Kind `DatabaseRole` and `DatabaseUser`
 
-In PostgreSQL sind Benutzer und Rollen dasselbe Objekt. `DatabaseUser` ist eine Rolle **mit**
-`LOGIN`, `DatabaseRole` eine Rolle **ohne** `LOGIN`. Die Discovery ordnet jede Rolle anhand von
-`rolcanlogin` genau einem Kind zu. Denselben Namen in beiden Kinds zu deklarieren ist ein Fehler
-(siehe [Grenzen](#grenzen)).
+In PostgreSQL, users and roles are the same object. `DatabaseUser` is a role **with**
+`LOGIN`, `DatabaseRole` a role **without** `LOGIN`. Discovery assigns each role to exactly one kind based on
+`rolcanlogin`. Declaring the same name in both kinds is an error
+(see [Limitations](#limitations)).
 
 ```yaml
 apiVersion: ordivus.dev/v1alpha1
@@ -58,75 +58,75 @@ metadata:
   name: analytics-app
 spec:
   targetRef: analytics-postgres
-  name: analytics_app            # optional, Default metadata.name
-  memberOf: [analytics_readonly] # Mitgliedschaften (genau diese Menge)
-  connectionLimit: 20            # -1 = unbegrenzt
+  name: analytics_app            # optional, default metadata.name
+  memberOf: [analytics_readonly] # Memberships (exactly this set)
+  connectionLimit: 20            # -1 = unlimited
   createdb: false
   createrole: false
-  credentials:                   # nur DatabaseUser
+  credentials:                   # DatabaseUser only
     credentialRef: analytics-app-password
-    passwordPolicy: verify       # verify (Default) | enforce | set-on-create
+    passwordPolicy: verify       # verify (default) | enforce | set-on-create
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 |---|---|
-| `name` | Rollenname, max. 63 Byte, beliebige Zeichen. Default `metadata.name` |
-| `memberOf` | Liste von Rollen; Ordivus vergibt und entzieht Mitgliedschaften, bis genau diese Menge besteht |
-| `connectionLimit` | `CONNECTION LIMIT`, Ganzzahl ≥ -1 |
+| `name` | Role name, max. 63 bytes, any characters. Default `metadata.name` |
+| `memberOf` | List of roles; Ordivus grants and revokes memberships until exactly this set exists |
+| `connectionLimit` | `CONNECTION LIMIT`, integer ≥ -1 |
 | `createdb`, `createrole` | `CREATEDB`/`NOCREATEDB`, `CREATEROLE`/`NOCREATEROLE` |
-| `superuser` | **nicht verwaltbar** – die Angabe ist ein Validierungsfehler |
+| `superuser` | **not manageable** – specifying it is a validation error |
 
-Nicht angegebene Felder werden nicht verwaltet, also auch nicht zurückgesetzt.
+Fields you omit are not managed, and therefore not reset either.
 
-### Privilegierte Rechte (`allowPrivilegedGrants`)
+### Privileged permissions (`allowPrivilegedGrants`)
 
-Ohne Operator Policy `allowPrivilegedGrants: true` wird eine Rolle bzw. ein Benutzer `BLOCKED`
-(im `apply` Exit-Code 11), wenn die Deklaration eines der folgenden Rechte vergibt:
+Without operator policy `allowPrivilegedGrants: true`, a role or user becomes `BLOCKED`
+(exit code 11 in `apply`) if the declaration grants any of the following permissions:
 
 - `createrole: true`,
-- `memberOf` einer vordefinierten Rolle `pg_*` (z. B. `pg_execute_server_program`,
+- `memberOf` a predefined `pg_*` role (e.g. `pg_execute_server_program`,
   `pg_read_server_files`, `pg_write_server_files`, `pg_read_all_data`),
-- `memberOf` einer Rolle, die selbst oder über ihre eigenen Mitgliedschaften (transitiv)
-  `SUPERUSER`, `CREATEROLE`, `REPLICATION` oder `BYPASSRLS` hat, in einer `pg_*`-Rolle ist oder
-  `LOGIN` hat (Mitgliedschaft in einem anderen Benutzerkonto erbt dessen Rechte und Objekte).
+- `memberOf` a role that, itself or through its own memberships (transitively), has
+  `SUPERUSER`, `CREATEROLE`, `REPLICATION` or `BYPASSRLS`, is in a `pg_*` role, or
+  has `LOGIN` (membership in another user account inherits its permissions and objects).
 
-Grants (Kind `Grant`) sind ohne Freigabe `BLOCKED`, wenn sie dem Empfänger erlauben, Code unter einer
-fremden Identität ausführen zu lassen:
+Grants (kind `Grant`) are `BLOCKED` without approval if they allow the recipient to have code executed under
+another identity:
 
-- `TRIGGER` auf `tables-in-schema`: Ein Trigger läuft als der Benutzer, der in die Tabelle schreibt.
-  Schreibt ein Superuser (oder ein Wartungsjob) in die Tabelle, führt er den Code des Empfängers mit
-  Superuser-Rechten aus.
-- `MAINTAIN` auf `tables-in-schema` (PostgreSQL 17): `VACUUM`/`ANALYZE`/`REINDEX`/`REFRESH` werten
-  Index- und Funktionsausdrücke aus, die andere Rollen auslösen.
-- `CREATE` auf `schema`: Der Empfänger kann Funktionen, Operatoren oder Tabellen anlegen, die im
-  `search_path` anderer Rollen (etwa `public`) vor den gemeinten Objekten gefunden werden.
-- `CREATE` auf `database`: Der Empfänger kann ein Schema mit dem Namen einer anderen Rolle anlegen;
-  das steht wegen `"$user"` am Anfang des Standard-`search_path` dieser Rolle (gleiche Wirkung).
+- `TRIGGER` on `tables-in-schema`: a trigger runs as the user who writes to the table.
+  If a superuser (or a maintenance job) writes to the table, it executes the recipient's code with
+  superuser permissions.
+- `MAINTAIN` on `tables-in-schema` (PostgreSQL 17): `VACUUM`/`ANALYZE`/`REINDEX`/`REFRESH` evaluate
+  index and function expressions triggered by other roles.
+- `CREATE` on `schema`: the recipient can create functions, operators or tables that are found in
+  other roles' `search_path` (such as `public`) before the intended objects.
+- `CREATE` on `database`: the recipient can create a schema named after another role;
+  because of `"$user"` at the start of the default `search_path`, it comes first for that role (same effect).
 
-**Immer** `BLOCKED`, auch mit Freigabe: `memberOf`, das (transitiv) die Rolle der Ordivus-Anmeldung
-(`endpoint.user`) oder den Bootstrap-Superuser (OID 10, meist `postgres`) vergibt, und – sobald
-`spec.scope.roles` gesetzt ist – `memberOf` einer Rolle außerhalb dieses Scopes (auch `pg_*`). Geprüft wird gegen
-den Live-Zustand der Rollen beim Lauf; eine noch nicht existierende Elternrolle wird bei ihrer eigenen
-Deklaration geprüft.
+**Always** `BLOCKED`, even with approval: `memberOf` that (transitively) grants the role of the Ordivus login
+(`endpoint.user`) or the bootstrap superuser (OID 10, usually `postgres`), and – once
+`spec.scope.roles` is set – `memberOf` a role outside this scope (including `pg_*`). The check runs against
+the live state of the roles at run time; a parent role that does not exist yet is checked at its own
+declaration.
 
-`spec.name` ist nötig, wenn mehrere Targets gleichnamige Rollen haben, denn `metadata.name` muss je
-Kind über die ganze Konfiguration eindeutig sein.
+`spec.name` is required when several targets have roles with the same name, because `metadata.name` must be
+unique per kind across the whole configuration.
 
-### Passwörter
+### Passwords
 
-Passwörter werden **clientseitig** in einen SCRAM-SHA-256-Verifier umgerechnet
-(`PQencryptPasswordConn`); der Klartext erreicht weder den Server noch dessen Statement-Log.
-`passwordPolicy: verify` prüft per Anmeldeversuch als der Benutzer gegen `endpoint.host` und
+Passwords are converted **client-side** into a SCRAM-SHA-256 verifier
+(`PQencryptPasswordConn`); the plaintext reaches neither the server nor its statement log.
+`passwordPolicy: verify` checks by attempting a login as the user against `endpoint.host` and
 `endpoint.database`:
 
-- Anmeldung gelingt → Passwort stimmt.
-- Server meldet `password authentication failed` (SQLSTATE 28P01) → `SET_PASSWORD`.
-- Alles andere (kein `pg_hba.conf`-Eintrag, kein `CONNECT`-Recht, Netzwerk) → `unknown`, es wird nichts geändert.
+- Login succeeds → password matches.
+- Server reports `password authentication failed` (SQLSTATE 28P01) → `SET_PASSWORD`.
+- Anything else (no `pg_hba.conf` entry, no `CONNECT` permission, network) → `unknown`, nothing is changed.
 
-Weil libpq bei Verbindungsfehlern keinen SQLSTATE liefert, erkennt Ordivus 28P01 am Servertext. Ist
-`lc_messages` des Servers nicht Englisch, ist das Ergebnis stets `unknown` (sicher, aber ohne
-Passwort-Drift-Erkennung); dann `enforce` verwenden oder `lc_messages = 'C'` setzen. Jeder
-Fehlversuch erscheint im Server-Log als fehlgeschlagene Anmeldung.
+Because libpq returns no SQLSTATE on connection errors, Ordivus detects 28P01 from the server text. If the
+server's `lc_messages` is not English, the result is always `unknown` (safe, but without
+password drift detection); in that case use `enforce` or set `lc_messages = 'C'`. Every
+failed attempt appears in the server log as a failed login.
 
 ## Kind `Database`
 
@@ -138,23 +138,23 @@ metadata:
 spec:
   targetRef: analytics-postgres
   owner: analytics_app   # ALTER DATABASE … OWNER TO
-  encoding: UTF8         # nur bei Anlage (TEMPLATE template0)
+  encoding: UTF8         # only on creation (TEMPLATE template0)
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 |---|---|
-| `name` | Datenbankname, Default `metadata.name` |
-| `owner` | Eigentümerrolle; Änderungen werden per `ALTER DATABASE … OWNER TO` umgesetzt |
-| `encoding` | Nur bei `CREATE`. Den Namen verwenden, den PostgreSQL meldet (z. B. `UTF8`, `LATIN1`); eine Abweichung an einer bestehenden Datenbank ist ein Fehler, keine Neuanlage |
+| `name` | Database name, default `metadata.name` |
+| `owner` | Owner role; changes are applied via `ALTER DATABASE … OWNER TO` |
+| `encoding` | Only on `CREATE`. Use the name PostgreSQL reports (e.g. `UTF8`, `LATIN1`); a mismatch on an existing database is an error, not a re-creation |
 
-`DELETE` einer Datenbank ist ein schlichtes `DROP DATABASE` ohne `FORCE`: Bestehende Verbindungen
-lassen die Operation fehlschlagen.
+`DELETE` of a database is a plain `DROP DATABASE` without `FORCE`: existing connections
+make the operation fail.
 
 ## Kind `Grant`
 
-Ein Grant ist das Tripel *Empfänger × Objekt × Privilegien*. Der natürliche Schlüssel ist
-`[grantee, database, on, schema]` (als JSON, z. B. `["analytics_readonly","analytics","schema","public"]`);
-`metadata.name` ist frei wählbar.
+A grant is the triple *recipient × object × privileges*. The natural key is
+`[grantee, database, on, schema]` (as JSON, e.g. `["analytics_readonly","analytics","schema","public"]`);
+`metadata.name` can be chosen freely.
 
 ```yaml
 apiVersion: ordivus.dev/v1alpha1
@@ -166,80 +166,80 @@ spec:
   grantee: analytics_readonly
   database: analytics
   on: tables-in-schema       # database | schema | tables-in-schema
-  schema: public             # Pflicht außer bei on: database
+  schema: public             # Required except for on: database
   privileges: [SELECT]
 ```
 
-| `on` | Objekt | erlaubte `privileges` |
+| `on` | Object | allowed `privileges` |
 |---|---|---|
-| `database` | die Datenbank `database` | `CONNECT`, `CREATE`, `TEMPORARY` (`TEMP`) |
-| `schema` | Schema `schema` in `database` | `CREATE`, `USAGE` |
-| `tables-in-schema` | alle Tabellen, Views, Materialized Views, Foreign Tables in `schema` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN` (ab PG 17) |
+| `database` | the database `database` | `CONNECT`, `CREATE`, `TEMPORARY` (`TEMP`) |
+| `schema` | schema `schema` in `database` | `CREATE`, `USAGE` |
+| `tables-in-schema` | all tables, views, materialized views, foreign tables in `schema` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN` (PG 17+) |
 
-Semantik:
+Semantics:
 
-- `privileges` ist **genau** die Menge, die der Empfänger auf dem Objekt hat: Ordivus vergibt
-  fehlende und entzieht nicht deklarierte Privilegien dieses Objekts. Groß-/Kleinschreibung egal.
-- `tables-in-schema`: Ein Privileg gilt als vorhanden, wenn der Empfänger es auf **jeder** Tabelle des
-  Schemas hat (als Eigentümer einer Tabelle zählt er dort als berechtigt). Neue Tabellen nach dem Lauf
-  sind beim nächsten Lauf Drift; `ALTER DEFAULT PRIVILEGES` wird nicht verwaltet.
-- `DELETE` eines Grants entzieht `ALL PRIVILEGES` auf dem Objekt.
-- Nicht unterstützt: `ALL`, `WITH GRANT OPTION`, Grants an `PUBLIC`, Spalten-, Sequenz-, Funktions-
-  und Einzeltabellen-Grants, Default Privileges.
-- Grants auf Systemschemas (`pg_catalog`, `information_schema`, alle `pg_*`) sind ein
-  Validierungsfehler: Die Discovery sieht diese Schemas nicht, solche Grants wären unsichtbar.
+- `privileges` is **exactly** the set the recipient has on the object: Ordivus grants
+  missing privileges and revokes undeclared privileges on this object. Case-insensitive.
+- `tables-in-schema`: a privilege counts as present if the recipient has it on **every** table in the
+  schema (as the owner of a table, it counts as authorized there). New tables created after the run
+  show up as drift on the next run; `ALTER DEFAULT PRIVILEGES` is not managed.
+- `DELETE` of a grant revokes `ALL PRIVILEGES` on the object.
+- Not supported: `ALL`, `WITH GRANT OPTION`, grants to `PUBLIC`, column, sequence, function
+  and single-table grants, default privileges.
+- Grants on system schemas (`pg_catalog`, `information_schema`, all `pg_*`) are a
+  validation error: discovery does not see these schemas, so such grants would be invisible.
 
-## Discovery und Scope
+## Discovery and scope
 
-- Rollen und Datenbanken stammen aus `pg_roles` und `pg_database` (für jede Anmelderolle lesbar).
-- Grants liegen je Datenbank. Ordivus öffnet für **jede** Datenbank im Scope (`datallowconn`, keine
-  Templates) eine eigene Read-only-Verbindung. Scheitert eine davon (z. B. fehlendes `CONNECT`), ist
-  das Inventar für `Grant` `partial` mit Begründung; deklarierte Grants werden dann `UNKNOWN`, nie
-  `CREATE`, und nichts wird gelöscht.
-- `spec.scope` des Targets begrenzt, was Ordivus überhaupt sieht. Objekte außerhalb erscheinen nicht
-  im Report und können nicht gelöscht werden. Ein deklarierter Grant auf eine Datenbank außerhalb des
-  Scopes schlägt im `apply` fehl. Was im authoritative-Modus gelöscht werden darf, regelt zusätzlich
-  die `ReconciliationPolicy` (`scope.resourceKinds`, `scope.<Kind>.glob/exact`).
-- `plan`/`drift` verbinden sich mit `default_transaction_read_only=on`; zusätzlich verweigert der
-  Adapter jede Operation auf einer Read-only-Session.
-- `apply` hält während des Laufs einen `pg_try_advisory_lock` mit festem Schlüssel (abgeleitet aus
-  „ordivus“) in `endpoint.database`. Ist er belegt, bricht der zweite Lauf mit einem vorübergehenden
-  Fehler ab, statt zu warten.
+- Roles and databases come from `pg_roles` and `pg_database` (readable by any login role).
+- Grants live per database. Ordivus opens a separate read-only connection for **every** database in scope
+  (`datallowconn`, no templates). If one of them fails (e.g. missing `CONNECT`), the
+  inventory for `Grant` is `partial` with a reason; declared grants then become `UNKNOWN`, never
+  `CREATE`, and nothing is deleted.
+- The target's `spec.scope` limits what Ordivus sees at all. Objects outside it do not appear
+  in the report and cannot be deleted. A declared grant on a database outside the
+  scope fails in `apply`. What may be deleted in authoritative mode is additionally governed by
+  the `ReconciliationPolicy` (`scope.resourceKinds`, `scope.<Kind>.glob/exact`).
+- `plan`/`drift` connect with `default_transaction_read_only=on`; in addition, the
+  adapter refuses any operation on a read-only session.
+- `apply` holds a `pg_try_advisory_lock` with a fixed key (derived from
+  "ordivus") in `endpoint.database` for the duration of the run. If it is taken, the second run aborts with a transient
+  error instead of waiting.
 
-## Geschützte Systemobjekte
+## Protected system objects
 
-Nie gelöscht oder geändert, nicht deklarierte werden als `IGNORE` gezählt:
+Never deleted or changed; undeclared ones are counted as `IGNORE`:
 
-- Rollen mit Präfix `pg_` und der Bootstrap-Superuser (OID 10, meist `postgres`),
-- die Datenbanken `postgres`, `template0`, `template1`,
-- Rollen, deren Mitglied die Ordivus-Anmeldung (transitiv) ist, samt der Grants an sie und an die
-  Anmeldung selbst: Entzug oder Löschen würde Ordivus aussperren,
-- Grants an diese Rollen und die impliziten Rechte des Objekteigentümers.
+- roles with prefix `pg_` and the bootstrap superuser (OID 10, usually `postgres`),
+- the databases `postgres`, `template0`, `template1`,
+- roles the Ordivus login is a member of (transitively), including the grants to them and to the
+  login itself: revoking or deleting them would lock Ordivus out,
+- grants to these roles and the implicit permissions of the object owner.
 
-Nicht verwaltbar (`manageable: false`, nie gelöscht, Änderungen `BLOCKED`): Superuser-Rollen und die
-Rolle, als die Ordivus angemeldet ist (`endpoint.user`).
+Not manageable (`manageable: false`, never deleted, changes `BLOCKED`): superuser roles and the
+role Ordivus is logged in as (`endpoint.user`).
 
-## Benötigte Rechte
+## Required permissions
 
-**Read-only-Identität (`plan`/`drift`):** `LOGIN` und `CONNECT` auf jeder Datenbank im Scope
-(Default über `PUBLIC`). Weitere Rechte sind nicht nötig. Für `passwordPolicy: verify` muss sich
-Ordivus zusätzlich als jeder verwaltete Benutzer an `endpoint.database` anmelden dürfen
+**Read-only identity (`plan`/`drift`):** `LOGIN` and `CONNECT` on every database in scope
+(by default via `PUBLIC`). No further permissions are needed. For `passwordPolicy: verify`,
+Ordivus must additionally be allowed to log in to `endpoint.database` as each managed user
 (`pg_hba.conf`, `CONNECT`).
 
-**Apply-Identität:** `CREATEROLE` (in PG 16+ zusätzlich `ADMIN OPTION` auf Rollen, deren Mitglieder
-vergeben werden, bzw. die Rolle hat sie selbst angelegt), `CREATEDB`, Mitgliedschaft in den
-Eigentümerrollen für `CREATE DATABASE … OWNER`/`ALTER … OWNER TO`, und für Grants das Recht, die
-Privilegien weiterzugeben (Eigentümer der Objekte oder `WITH GRANT OPTION`). Ein Superuser kann alles,
-ist aber nicht nötig; bei verwalteten Diensten (RDS, Cloud SQL) die dortige Admin-Rolle verwenden.
+**Apply identity:** `CREATEROLE` (in PG 16+ additionally `ADMIN OPTION` on roles whose memberships
+are granted, or the role created them itself), `CREATEDB`, membership in the
+owner roles for `CREATE DATABASE … OWNER`/`ALTER … OWNER TO`, and for grants the right to pass on the
+privileges (owner of the objects or `WITH GRANT OPTION`). A superuser can do everything
+but is not required; on managed services (RDS, Cloud SQL) use the admin role provided there.
 
-## Grenzen
+## Limitations
 
-- Derselbe Name als `DatabaseRole` und `DatabaseUser` ist ein Konfigurationsfehler (Exit-Code 12),
-  schon bei `config validate`.
-- `REVOKE` entzieht nur Rechte, die die Apply-Identität selbst vergeben hat. Von anderen Rollen
-  vergebene Rechte bleiben bestehen; die Operation wird dann als `unverified` gemeldet.
-- `tables-in-schema` auf einem Schema **ohne Tabellen** ist nicht beobachtbar und bleibt bei jedem
-  Lauf `CREATE` (der `GRANT` selbst ist dann wirkungslos).
-- `DROP ROLE` scheitert, wenn die Rolle noch Objekte besitzt oder Rechte hält; Ordivus führt kein
-  `REASSIGN OWNED`/`DROP OWNED` aus.
-- Identifier über 63 Byte sind ein Validierungsfehler (PostgreSQL würde sie stillschweigend kürzen).
+- The same name as both `DatabaseRole` and `DatabaseUser` is a configuration error (exit code 12),
+  already during `config validate`.
+- `REVOKE` only revokes permissions that the apply identity granted itself. Permissions granted by other roles
+  remain; the operation is then reported as `unverified`.
+- `tables-in-schema` on a schema **without tables** is not observable and stays `CREATE` on every
+  run (the `GRANT` itself has no effect then).
+- `DROP ROLE` fails if the role still owns objects or holds permissions; Ordivus does not run
+  `REASSIGN OWNED`/`DROP OWNED`.
+- Identifiers longer than 63 bytes are a validation error (PostgreSQL would silently truncate them).

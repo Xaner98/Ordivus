@@ -1,8 +1,8 @@
-# Adapter `openbao` – ACL-Policies
+# Adapter `openbao` – ACL policies
 
-Verwaltet OpenBao-ACL-Policies deklarativ (`plan`/`drift`/`apply`). Getrennt vom
-[Credential Provider `openbao-kv-v2`](../credentials/openbao.md): eigenes Target, eigenes Token.
-HashiCorp-Vault-Kompatibilität ist **nicht getestet**.
+Manages OpenBao ACL policies declaratively (`plan`/`drift`/`apply`). Separate from the
+[credential provider `openbao-kv-v2`](../credentials/openbao.md): its own target, its own token.
+HashiCorp Vault compatibility is **not tested**.
 
 ## Target
 
@@ -19,12 +19,12 @@ spec:
     caFile: /etc/ordivus/openbao-ca.pem      # optional
   protectedPolicies: [break-glass, ordivus-readonly, ordivus-apply]
   authentication:
-    credentialRef: openbao-policy-admin      # Secret = OpenBao-Token
+    credentialRef: openbao-policy-admin      # secret = OpenBao token
 ```
 
-Das Token kommt wie jedes Admin-Credential über `authentication.credentialRef` (z. B. aus einer
-gemounteten Datei über den Provider `file`). Es sollte **nicht** dieselbe Identität sein, die der
-Credential Provider nutzt.
+Like every admin credential, the token comes via `authentication.credentialRef` (e.g. from a
+mounted file via the `file` provider). It should **not** be the same identity that the
+credential provider uses.
 
 ## Kind `OpenBaoPolicy`
 
@@ -34,16 +34,16 @@ metadata:
   name: analytics-readonly
 spec:
   targetRef: security-openbao
-  policyName: analytics-readonly     # Schlüssel; [a-z0-9][a-z0-9_.-]* (OpenBao trimmt und kleinschreibt Namen)
+  policyName: analytics-readonly     # key; [a-z0-9][a-z0-9_.-]* (OpenBao trims and lowercases names)
   rules:
     - path: secret/data/analytics/*
       capabilities: [read]
 ```
 
-Alternativ `spec.policy` mit rohem HCL-Text (genau eins von `rules`/`policy`).
+Alternatively `spec.policy` with raw HCL text (exactly one of `rules`/`policy`).
 
-**Rendering von `rules`:** Pfade in deklarierter Reihenfolge, Capabilities sortiert und
-dedupliziert, zwei Leerzeichen Einrückung, Leerzeile zwischen Blöcken:
+**Rendering of `rules`:** paths in declared order, capabilities sorted and
+deduplicated, two-space indentation, blank line between blocks:
 
 ```hcl
 path "secret/data/analytics/*" {
@@ -51,78 +51,78 @@ path "secret/data/analytics/*" {
 }
 ```
 
-**Vergleich:** Beobachteter und gewünschter Text werden kanonisiert (einheitliche Zeilenenden,
-Leerraum am Zeilenende und Leerzeilen am Anfang/Ende entfernt) und dann verglichen. Jede andere
-Abweichung ist `UPDATE`. Semantisch gleiche, aber anders formatierte Policies (Einrückung,
-Reihenfolge, Kommentare) erscheinen daher **einmal** als `UPDATE`; danach steht der Ordivus-Text in
-OpenBao und der Lauf konvergiert zu `NOOP`. Ein semantischer HCL-Vergleich findet nicht statt.
+**Comparison:** observed and desired text are canonicalized (uniform line endings,
+trailing whitespace and leading/trailing blank lines removed) and then compared. Any other
+deviation is `UPDATE`. Semantically equal but differently formatted policies (indentation,
+order, comments) therefore appear **once** as `UPDATE`; after that, the Ordivus text is in
+OpenBao and the run converges to `NOOP`. No semantic HCL comparison takes place.
 
-Discovery: `GET sys/policies/acl?list=true`, dann `GET sys/policies/acl/<name>` je Policy.
-Fehlt das Recht (403), ist das Inventar `forbidden` – nie „leer“.
+Discovery: `GET sys/policies/acl?list=true`, then `GET sys/policies/acl/<name>` per policy.
+If the permission is missing (403), the inventory is `forbidden` – never "empty".
 
-## Schutzregeln (Self-Escalation / Self-Lockout, §11.4, F-32)
+## Protection rules (self-escalation / self-lockout, §11.4, F-32)
 
-Nie geändert oder gelöscht werden:
+The following are never changed or deleted:
 
 - `root`, `default`,
-- alle Namen aus `protectedPolicies` (z. B. Break-Glass- und Ordivus-eigene Policies),
-- alle Policies des verwendeten Tokens (`GET auth/token/lookup-self`: `policies` und
-  `identity_policies`) – Ordivus kann sich so weder neue Rechte geben noch aussperren.
+- all names from `protectedPolicies` (e.g. break-glass and Ordivus' own policies),
+- all policies of the token in use (`GET auth/token/lookup-self`: `policies` and
+  `identity_policies`) – this way Ordivus can neither grant itself new permissions nor lock itself out.
 
-OpenBao entfernt Leerraum am Rand und schreibt Namen klein (`" Default"` ist `default`). Deshalb
-muss `policyName` schon in Normalform `[a-z0-9][a-z0-9_.-]*` vorliegen (sonst Config-Fehler), und
-`protectedPolicies` wird vor jedem Vergleich ebenso normalisiert (`Break-Glass` schützt `break-glass`).
+OpenBao strips surrounding whitespace and lowercases names (`" Default"` is `default`). Therefore
+`policyName` must already be in normal form `[a-z0-9][a-z0-9_.-]*` (otherwise config error), and
+`protectedPolicies` is normalized the same way before every comparison (`Break-Glass` protects `break-glass`).
 
-Deklariert → `BLOCKED` (auch ohne Abweichung und auch, wenn sie noch nicht existiert); nicht
-deklariert → `IGNORE`, auch im authoritative Mode. `apply` endet dann mit Exit-Code 11; die übrigen
-Policies werden trotzdem geschrieben.
+Declared → `BLOCKED` (even without deviation and even if it does not exist yet); not
+declared → `IGNORE`, even in authoritative mode. `apply` then ends with exit code 11; the other
+policies are still written.
 
-Diese Sperre ist eine zweite Verteidigungslinie. Die eigentliche Grenze ist die OpenBao-Policy
-des Apply-Tokens: Schreibrechte nur auf einen Namensbereich, z. B.
+This lock is a second line of defense. The actual boundary is the OpenBao policy
+of the apply token: write permissions only on a name range, e.g.
 
 ```hcl
 path "sys/policies/acl"        { capabilities = ["list"] }
 path "sys/policies/acl/app-*"  { capabilities = ["create", "read", "update", "delete"] }
 ```
 
-Achtung: Wer Policies schreiben darf, die anderen Identitäten zugeordnet sind, kann darüber
-indirekt Rechte vergeben. Policy-Namensbereich und Zuordnung (Auth-Rollen, Gruppen) getrennt
-kontrollieren; Break-Glass-Runbook bereithalten.
+Caution: anyone who may write policies that are assigned to other identities can
+grant permissions indirectly through them. Control the policy name range and the assignment (auth roles, groups)
+separately; keep a break-glass runbook ready.
 
-## Privilegierte Policies (`allowPrivilegedGrants`)
+## Privileged policies (`allowPrivilegedGrants`)
 
-Ohne Operator Policy `allowPrivilegedGrants: true` ist eine `OpenBaoPolicy` `BLOCKED` (in `apply`
-Exit 11), wenn sie
+Without operator policy `allowPrivilegedGrants: true`, an `OpenBaoPolicy` is `BLOCKED` (in `apply`
+exit 11) if it
 
-- irgendwo die Capability `sudo` vergibt,
-- einen Pfad unter `sys/` mit einer anderen Capability als `deny` erlaubt – auch über Muster, die
-  `sys/` treffen können: `*`, `s*`, `sy*`, `sys*`, `+/…` oder Templates wie `{{identity.entity.name}}/…`,
-- unter `auth/` oder `identity/` schreibt (`create`, `update`, `patch`, `delete`), z. B. Benutzer
-  einer Auth-Methode anlegen, Tokens erzeugen oder Entities/Gruppen ändern. Lesen (`read`, `list`)
-  bleibt erlaubt. Ausgenommen sind genau die Pfade `auth/token/renew-self`, `auth/token/revoke-self`
-  und `auth/token/lookup-self` mit `read`/`update`: sie wirken nur auf das eigene Token. Ein Muster wie
-  `auth/token/*` bleibt privilegiert.
+- grants the capability `sudo` anywhere,
+- allows a path under `sys/` with any capability other than `deny` – also via patterns that
+  can match `sys/`: `*`, `s*`, `sy*`, `sys*`, `+/…` or templates such as `{{identity.entity.name}}/…`,
+- writes under `auth/` or `identity/` (`create`, `update`, `patch`, `delete`), e.g. creating users
+  of an auth method, generating tokens or changing entities/groups. Reading (`read`, `list`)
+  stays allowed. Exempt are exactly the paths `auth/token/renew-self`, `auth/token/revoke-self`
+  and `auth/token/lookup-self` with `read`/`update`: they only affect the token itself. A pattern such as
+  `auth/token/*` stays privileged.
 
-`spec.rules` wird exakt geprüft. Rohes HCL in `spec.policy` liest Ordivus konservativ: erlaubt sind
-nur Blöcke `path "…" { capabilities = [ "…", … ] }` und Kommentare (`#`, `//`, `/* */`). Alles andere
-(weitere Block-Parameter wie `allowed_parameters`, JSON-Syntax, unbekannte Escapes) kann Ordivus nicht
-sicher bewerten; die Policy gilt dann als privilegiert. Mit Namespaces (Pfade wie `ns1/sys/…`) rechnet
-die Prüfung nicht, da der Adapter nur den Root-Namespace verwaltet.
+`spec.rules` is checked exactly. Ordivus reads raw HCL in `spec.policy` conservatively: only
+blocks `path "…" { capabilities = [ "…", … ] }` and comments (`#`, `//`, `/* */`) are allowed. Anything else
+(further block parameters such as `allowed_parameters`, JSON syntax, unknown escapes) Ordivus cannot
+assess safely; the policy then counts as privileged. The check does not account for namespaces (paths such as `ns1/sys/…`),
+since the adapter only manages the root namespace.
 
 ## Read-only
 
-`plan`/`drift` öffnen eine Read-only-Session; `apply` wird darin verweigert. Das ist nur eine
-Programm-Sperre – die echte Garantie ist ein Read-only-Token:
+`plan`/`drift` open a read-only session; `apply` is refused in it. This is only a
+program-level lock – the real guarantee is a read-only token:
 
 ```hcl
 path "sys/policies/acl"   { capabilities = ["list"] }
 path "sys/policies/acl/*" { capabilities = ["read"] }
 ```
 
-## Grenzen
+## Limitations
 
-- Nur ACL-Policies; keine Namespaces, keine Sentinel-/EGP-/RGP-Policies, keine Auth-Methoden oder
-  Rollen-Zuordnungen.
-- Kein `X-Vault-Namespace` am Target (nur Root-Namespace).
-- Textvergleich statt semantischem HCL-Vergleich (siehe oben).
-- `http://`-Endpoints werden nicht abgelehnt; in Produktion `https://` mit Zertifikatsprüfung.
+- ACL policies only; no namespaces, no Sentinel/EGP/RGP policies, no auth methods or
+  role assignments.
+- No `X-Vault-Namespace` on the target (root namespace only).
+- Text comparison instead of semantic HCL comparison (see above).
+- `http://` endpoints are not rejected; in production use `https://` with certificate verification.

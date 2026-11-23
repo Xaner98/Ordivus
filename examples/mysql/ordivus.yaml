@@ -1,4 +1,4 @@
-# Beispiel: Shop-Datenbank mit Leserolle, Anwendungsuser und Grants auf MySQL 8.
+# Example: shop database with a read role, application user and grants on MySQL 8.
 apiVersion: ordivus.dev/v1alpha1
 kind: Target
 metadata:

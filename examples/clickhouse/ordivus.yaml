@@ -1,5 +1,5 @@
-# ClickHouse: Reporting-Datenbank mit Lese-Rolle und einem Anwendungsbenutzer.
-# Prüfen ohne Verbindung: ordivus config validate -f examples/clickhouse
+# ClickHouse: reporting database with a read role and an application user.
+# Validate without a connection: ordivus config validate -f examples/clickhouse
 apiVersion: ordivus.dev/v1alpha1
 kind: CredentialProvider
 metadata:

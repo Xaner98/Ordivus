@@ -6,7 +6,7 @@ ARG PYTHON_IMAGE=python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f
 FROM ${PYTHON_IMAGE} AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m venv /opt/ordivus
-# Abhängigkeiten nur aus dem hash-gepinnten Lock (requirements.lock, siehe docs/entwicklung.md).
+# Abhängigkeiten nur aus dem hash-gepinnten Lock (requirements.lock, siehe docs/development.md).
 COPY requirements.lock /src/
 RUN /opt/ordivus/bin/pip install --require-hashes --only-binary=:all: -r /src/requirements.lock
 COPY pyproject.toml README.md LICENSE /src/

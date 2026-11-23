@@ -1,7 +1,7 @@
-# ArcadeDB-Adapter (`arcadedb`, Beta)
+# ArcadeDB adapter (`arcadedb`, beta)
 
-Verwaltet Datenbanken und Server-Benutzer einer ArcadeDB-Instanz über die HTTP-API
-(`/api/v1`). Keine zusätzliche Abhängigkeit: Der Adapter nutzt nur die Python-Standardbibliothek.
+Manages databases and server users of an ArcadeDB instance through the HTTP API
+(`/api/v1`). No additional dependency: the adapter uses only the Python standard library.
 
 ## Target
 
@@ -14,33 +14,33 @@ spec:
   adapter: arcadedb
   endpoint:
     host: arcadedb.data-platform.svc.cluster.local
-    port: 2480            # Default 2480
-    tls:                  # vorhanden → https; ohne tls → http (unsicher, siehe requireTls)
-      caFile: /trust/ca.pem   # optional, sonst System-CAs
-  username: root          # Default root
+    port: 2480            # default 2480
+    tls:                  # present → https; without tls → http (insecure, see requireTls)
+      caFile: /trust/ca.pem   # optional, otherwise system CAs
+  username: root          # default root
   authentication:
-    credentialRef: arcadedb-root   # Passwort des Admin-Benutzers
-  scope:                  # optional; Objekte außerhalb werden nicht gelesen/gemeldet
+    credentialRef: arcadedb-root   # password of the admin user
+  scope:                  # optional; objects outside are not read/reported
     databases:
       include: ["analytics_*"]
     users:
       include: ["graph_*"]
 ```
 
-Die Verbindung wird beim Start mit `GET /api/v1/server?mode=basic` geprüft (401/403 → Target-Fehler,
-Exit-Code 13). Authentifizierung per HTTP Basic Auth; das Passwort erscheint nie in URLs, Logs
-oder Fehlermeldungen.
+The connection is checked at startup with `GET /api/v1/server?mode=basic` (401/403 → target error,
+exit code 13). Authentication uses HTTP Basic Auth; the password never appears in URLs, logs
+or error messages.
 
 ## Kinds
 
-Reihenfolge beim Anlegen: `Database`, dann `DatabaseUser`; Löschungen umgekehrt.
+Creation order: `Database`, then `DatabaseUser`; deletions in reverse.
 
 ### `Database`
 
-Keine Felder. Der Name ist `metadata.name` und muss `[A-Za-z0-9_][A-Za-z0-9_-]*` (max. 128 Zeichen)
-entsprechen, weil ArcadeDBs Server-Kommandos (`create database <name>`) Freitext ohne Quoting sind.
-Andere Namen werden bei der Validierung abgelehnt; vorhandene Datenbanken mit anderen Namen
-werden zwar gemeldet, aber als nicht verwaltbar markiert (nie gelöscht).
+No fields. The name is `metadata.name` and must match `[A-Za-z0-9_][A-Za-z0-9_-]*` (max. 128 characters),
+because ArcadeDB's server commands (`create database <name>`) are free text without quoting.
+Other names are rejected during validation; existing databases with other names
+are reported but marked as not manageable (never deleted).
 
 ```yaml
 kind: Database
@@ -52,10 +52,10 @@ spec:
 
 ### `DatabaseUser`
 
-| Feld | Typ | Bedeutung |
+| Field | Type | Meaning |
 |---|---|---|
-| `databases` | Mapping Datenbank → Liste von Gruppen | ArcadeDBs Zuordnung pro Datenbank. Gruppen z. B. `crud`, `readonly`, `admin` oder eigene Gruppen aus `server-groups.json`. `*` (alle, auch künftige Datenbanken) wird abgelehnt; mit `spec.scope.databases` am Target muss jede Datenbank im Scope liegen (sonst Config-Fehler). |
-| `credentials` | Engine-Feld | **Pflicht beim Anlegen**: ArcadeDB legt keine Benutzer ohne Passwort (min. 8 Zeichen) an. |
+| `databases` | Mapping database → list of groups | ArcadeDB's per-database assignment. Groups e.g. `crud`, `readonly`, `admin` or custom groups from `server-groups.json`. `*` (all databases, including future ones) is rejected; with `spec.scope.databases` on the target, every database must be in scope (otherwise config error). |
+| `credentials` | Engine field | **Required on creation**: ArcadeDB does not create users without a password (min. 8 characters). |
 
 ```yaml
 kind: DatabaseUser
@@ -70,76 +70,76 @@ spec:
     passwordPolicy: verify
 ```
 
-Vergleichssemantik:
+Comparison semantics:
 
-- `databases` fehlt → Zuordnung wird nicht verwaltet (weder gelesen noch zurückgesetzt).
-- `databases: {}` → Benutzer soll keiner Datenbank zugeordnet sein.
-- Gruppenlisten werden sortiert und dedupliziert; Reihenfolge ist bedeutungslos.
-- `databases` wird als Ganzes verglichen und bei Abweichung per `PUT /api/v1/server/users`
-  vollständig ersetzt (ArcadeDB kennt kein teilweises Ändern der Zuordnung).
-- Benutzernamen dürfen beliebige druckbare Zeichen enthalten (auch Anführungszeichen, Klammern,
-  Leerzeichen), nicht aber mit `apitoken:` beginnen. Namen werden nur als JSON-Wert bzw.
-  URL-kodierter Query-Parameter übertragen.
+- `databases` missing → the assignment is not managed (neither read nor reset).
+- `databases: {}` → the user should not be assigned to any database.
+- Group lists are sorted and deduplicated; order is irrelevant.
+- `databases` is compared as a whole and, on deviation, replaced completely via `PUT /api/v1/server/users`
+  (ArcadeDB does not support partial changes to the assignment).
+- User names may contain any printable characters (including quotes, brackets,
+  spaces), but must not start with `apitoken:`. Names are only transmitted as a JSON value or
+  URL-encoded query parameter.
 
-Passwörter:
+Passwords:
 
-- Anlegen: `POST /api/v1/server/users` mit Passwort aus dem Credential.
-- `SET_PASSWORD`: `PUT /api/v1/server/users?name=…` setzt das Passwort in-place.
-- `verify`: Login-Versuch als der Benutzer gegen `GET /api/v1/server?mode=basic`:
-  200 → gleich, 401 → abweichend, alles andere (z. B. 403, Timeout) → `unknown`.
-  Benutzernamen mit `:` sind per Basic Auth nicht prüfbar → immer `unknown`.
+- Create: `POST /api/v1/server/users` with the password from the credential.
+- `SET_PASSWORD`: `PUT /api/v1/server/users?name=…` sets the password in place.
+- `verify`: login attempt as the user against `GET /api/v1/server?mode=basic`:
+  200 → equal, 401 → different, anything else (e.g. 403, timeout) → `unknown`.
+  User names containing `:` cannot be checked via Basic Auth → always `unknown`.
 
 ## Discovery
 
-| Kind | Quelle | Status |
+| Kind | Source | Status |
 |---|---|---|
-| `Database` | `GET /api/v1/databases` | `complete` nur bei `username: root`; andere Benutzer sehen nur ihre Datenbanken → `partial` |
-| `DatabaseUser` | `GET /api/v1/server/users` (Namen + Datenbank/Gruppen, nie Passwort-Hashes) | `complete`; ohne root-Rechte 403 → `forbidden` |
+| `Database` | `GET /api/v1/databases` | `complete` only with `username: root`; other users see only their databases → `partial` |
+| `DatabaseUser` | `GET /api/v1/server/users` (names + database/groups, never password hashes) | `complete`; without root privileges 403 → `forbidden` |
 
-Bei `partial`/`forbidden` gibt es weder `CREATE` noch `DELETE` für das jeweilige Kind.
+With `partial`/`forbidden` there is neither `CREATE` nor `DELETE` for the respective kind.
 
-## Benötigte Rechte
+## Required privileges
 
-ArcadeDB erlaubt Server-Kommandos und Benutzerverwaltung **nur dem Benutzer `root`**. Für `apply`
-ist deshalb `username: root` nötig. Mit einem anderen Benutzer ist nur ein eingeschränkter
-`plan`/`drift` möglich (Datenbanken `partial`, Benutzer `forbidden`).
+ArcadeDB allows server commands and user management **only for the user `root`**. `apply`
+therefore requires `username: root`. With a different user, only a limited
+`plan`/`drift` is possible (databases `partial`, users `forbidden`).
 
-## Geschützte Objekte
+## Protected objects
 
-- Benutzer `root` und der Benutzer, mit dem Ordivus sich verbindet, sind Systemobjekte:
-  nicht deklariert → `IGNORE`; nie gelöscht, nie geändert. Deklariert → `BLOCKED`, auch wenn sie
-  wegen `scope.users` nie entdeckt werden (sonst würde ein `CREATE` den bestehenden `root` überschreiben).
+- The user `root` and the user Ordivus connects as are system objects:
+  not declared → `IGNORE`; never deleted, never changed. Declared → `BLOCKED`, even if they
+  are never discovered because of `scope.users` (otherwise a `CREATE` would overwrite the existing `root`).
+- `DELETE` only in `authoritative` mode with operator approval (`allowAuthoritative`, `allowDelete`)
+  and complete discovery.
 
-## Privilegierte Rechte (`allowPrivilegedGrants`)
+## Privileged grants (`allowPrivilegedGrants`)
 
-Ohne `allowPrivilegedGrants: true` in der Operator-Policy ist ein `DatabaseUser`, der in irgendeiner
-Datenbank die Gruppe **`admin`** erhalten soll, `BLOCKED` (Schema, Sicherheit und Konfiguration der
-Datenbank). `root` und der eigene Login bleiben auch mit Freigabe gesperrt.
-- `DELETE` nur in `authoritative`-Modus mit Operator-Freigabe (`allowAuthoritative`, `allowDelete`)
-  und vollständiger Discovery.
+Without `allowPrivilegedGrants: true` in the operator policy, a `DatabaseUser` that is to receive the group
+**`admin`** in any database is `BLOCKED` (schema, security and configuration of the
+database). `root` and Ordivus' own login stay blocked even with approval.
 
-## Read-only-Garantie
+## Read-only guarantee
 
-`plan`/`drift` öffnen Read-only-Sessions. Der Adapter verweigert darin jede HTTP-Methode außer `GET`
-sowie jeden `apply`-Aufruf (`PermanentError`), bevor ein Request das Netz erreicht.
+`plan`/`drift` open read-only sessions. In them, the adapter refuses every HTTP method except `GET`
+as well as every `apply` call (`PermanentError`) before a request reaches the network.
 
-## Fehlerabbildung
+## Error mapping
 
-| Ursache | Fehler |
+| Cause | Error |
 |---|---|
-| Timeout, Verbindungsfehler, HTTP 5xx/429 | `TransientError` |
+| Timeout, connection error, HTTP 5xx/429 | `TransientError` |
 | HTTP 401/403 | `AuthorizationError` |
-| übrige 4xx, ungültiges JSON, unlesbares `caFile` | `PermanentError` |
+| other 4xx, invalid JSON, unreadable `caFile` | `PermanentError` |
 
-Idempotenz: `create database` bei existierender bzw. `drop database` bei fehlender Datenbank gilt
-nach erneutem Lesen als Erfolg; Löschen eines nicht (mehr) vorhandenen Benutzers (404) ebenso.
+Idempotency: `create database` for an existing database or `drop database` for a missing one counts
+as success after re-reading; deleting a user that does not exist (any more) (404) likewise.
 
-## Einschränkungen
+## Limitations
 
-- Benutzer sind **serverweit**, nicht pro Datenbank; `scope.users` filtert nur nach Namen.
-- Gruppen (`server-groups.json`) und API-Tokens werden nicht verwaltet; nicht vorhandene Gruppen-
-  oder Datenbanknamen in `databases` werden von ArcadeDB ohne Fehler übernommen.
-- Benötigt eine ArcadeDB-Version mit `/api/v1/server/users` (getestet mit 26.12); ältere Versionen
-  liefern dort 404 → Discovery-Fehler (`unknown`), keine Änderungen.
-- Keine Sperre (`lock`): parallele Läufe gegen dieselbe Instanz sind nicht gegeneinander abgesichert.
-- HA-Cluster: Änderungen repliziert ArcadeDB selbst; nicht separat getestet.
+- Users are **server-wide**, not per database; `scope.users` filters by name only.
+- Groups (`server-groups.json`) and API tokens are not managed; non-existent group
+  or database names in `databases` are accepted by ArcadeDB without error.
+- Requires an ArcadeDB version with `/api/v1/server/users` (tested with 26.12); older versions
+  return 404 there → discovery error (`unknown`), no changes.
+- No locking (`lock`): parallel runs against the same instance are not protected against each other.
+- HA cluster: ArcadeDB replicates changes itself; not tested separately.

@@ -2,52 +2,52 @@
 
 A lightweight, stateless, Kubernetes-native configuration engine for heterogeneous infrastructure. One engine. Every platform.
 
-**Ordivus** verwaltet Benutzer, Rollen, Berechtigungen, Datenbanken und Policies in den Systemen, die Sie bereits betreiben – deklarativ, zustandslos und mit denselben drei Befehlen für jedes System:
+**Ordivus** manages users, roles, permissions, databases and policies in the systems you already run – declaratively, statelessly and with the same three commands for every system:
 
 ```sh
-ordivus plan  -f ./config    # Was würde sich ändern?
-ordivus drift -f ./config    # Weicht die Realität ab? Gibt es fremde Objekte?
-ordivus apply -f ./config    # Erlaubte Änderungen ausführen und prüfen
+ordivus plan  -f ./config    # What would change?
+ordivus drift -f ./config    # Does reality deviate? Are there foreign objects?
+ordivus apply -f ./config    # Execute and verify permitted changes
 ```
 
-Sie beschreiben den gewünschten Zustand in YAML. Ordivus liest bei jedem Lauf den Istzustand direkt aus dem Zielsystem, zeigt jeden Unterschied und ändert nur, was erlaubt ist. Es gibt keine State-Datei, keine eigene Datenbank und keinen dauerhaft laufenden Controller.
+You describe the desired state in YAML. On every run, Ordivus reads the actual state directly from the target system, shows every difference and changes only what is permitted. There is no state file, no database of its own and no permanently running controller.
 
-> **Status:** Alpha (`0.1.0`). Schnittstellen und Konfigurationsformat können sich bis `1.0` ändern.
+> **Status:** Alpha (`0.1.0`). Interfaces and the configuration format may change before `1.0`.
 
-## Warum Ordivus?
+## Why Ordivus?
 
-- **Ein Workflow für viele Systeme.** PostgreSQL, MySQL, ClickHouse, ArcadeDB, Redis und OpenBao mit derselben Konfigurationsform, denselben Befehlen, denselben Exit-Codes und demselben Report-Format.
-- **Zustandslos.** Die Wahrheit liegt in Ihrer Konfiguration und im Zielsystem. Ordivus sieht deshalb auch Objekte, die jemand von Hand angelegt hat.
-- **Sicher als Standard.** Nicht deklarierte Objekte werden nur gemeldet, nie stillschweigend gelöscht. Löschen braucht einen ausdrücklich abgegrenzten Scope *und* eine getrennt verwaltete Operator Policy. Was nicht vollständig lesbar ist, gilt als unbekannt – nicht als leer.
-- **Secrets bleiben geheim.** Passwörter stehen nie in der Konfiguration und nie in Reports oder Logs. Fehlende Passwörter erzeugt Ordivus kryptografisch sicher und legt sie *create-if-absent* in Ihrem Secret Store ab (Datei/Kubernetes Secret oder OpenBao).
-- **Passt in Ihre Automatisierung.** GitLab CI, Jenkins, Argo CD, Flux, Kubernetes CronJobs oder einfach Ihr Terminal. Ordivus ist ein CLI-Prozess, der startet, arbeitet und endet.
-- **Läuft überall.** Lokal, in CI, auf einer VM oder als Kubernetes Job; Zielsysteme innerhalb oder außerhalb eines Clusters.
+- **One workflow for many systems.** PostgreSQL, MySQL, ClickHouse, ArcadeDB, Redis and OpenBao with the same configuration shape, the same commands, the same exit codes and the same report format.
+- **Stateless.** The truth lives in your configuration and in the target system. That is why Ordivus also sees objects someone created by hand.
+- **Safe by default.** Undeclared objects are only reported, never silently deleted. Deleting requires an explicitly bounded scope *and* a separately managed operator policy. Anything that cannot be read completely counts as unknown – not as empty.
+- **Secrets stay secret.** Passwords never appear in the configuration, and never in reports or logs. Ordivus generates missing passwords in a cryptographically secure way and stores them *create-if-absent* in your secret store (file/Kubernetes Secret or OpenBao).
+- **Fits your automation.** GitLab CI, Jenkins, Argo CD, Flux, Kubernetes CronJobs or simply your terminal. Ordivus is a CLI process that starts, works and exits.
+- **Runs anywhere.** Locally, in CI, on a VM or as a Kubernetes Job; target systems inside or outside a cluster.
 
-## Unterstützte Systeme
+## Supported systems
 
-| Adapter | Verwaltete Ressourcen | Doku |
+| Adapter | Managed resources | Docs |
 |---|---|---|
-| PostgreSQL | Datenbanken, Rollen, Benutzer, Mitgliedschaften, Grants (Datenbank, Schema, Tabellen eines Schemas) | [docs/adapters/postgresql.md](docs/adapters/postgresql.md) |
-| MySQL | Datenbanken, Rollen, Accounts (`user@host`), Rollenzuweisungen, Grants | [docs/adapters/mysql.md](docs/adapters/mysql.md) |
-| ClickHouse | Datenbanken, Rollen, Benutzer, Grants | [docs/adapters/clickhouse.md](docs/adapters/clickhouse.md) |
-| ArcadeDB | Datenbanken, Benutzer mit Gruppen je Datenbank | [docs/adapters/arcadedb.md](docs/adapters/arcadedb.md) |
-| Redis | ACL-Benutzer (Keys, Channels, Commands) | [docs/adapters/redis.md](docs/adapters/redis.md) |
-| OpenBao | ACL-Policies | [docs/adapters/openbao.md](docs/adapters/openbao.md) |
+| PostgreSQL | Databases, roles, users, memberships, grants (database, schema, tables of a schema) | [docs/adapters/postgresql.md](docs/adapters/postgresql.md) |
+| MySQL | Databases, roles, accounts (`user@host`), role assignments, grants | [docs/adapters/mysql.md](docs/adapters/mysql.md) |
+| ClickHouse | Databases, roles, users, grants | [docs/adapters/clickhouse.md](docs/adapters/clickhouse.md) |
+| ArcadeDB | Databases, users with groups per database | [docs/adapters/arcadedb.md](docs/adapters/arcadedb.md) |
+| Redis | ACL users (keys, channels, commands) | [docs/adapters/redis.md](docs/adapters/redis.md) |
+| OpenBao | ACL policies | [docs/adapters/openbao.md](docs/adapters/openbao.md) |
 
-Secret-Quellen: Dateien bzw. gemountete Kubernetes Secrets, [OpenBao KV v2](docs/credentials/openbao.md) und – nur zur Entwicklung – Umgebungsvariablen.
+Secret sources: files or mounted Kubernetes Secrets, [OpenBao KV v2](docs/credentials/openbao.md) and – for development only – environment variables.
 
 ## Installation
 
-Voraussetzung: Python 3.13 oder neuer.
+Requirement: Python 3.13 or newer.
 
 ```sh
 pip install "ordivus[postgresql,mysql,redis] @ git+https://github.com/Xaner98/Ordivus.git"
 ordivus --version
 ```
 
-Die Extras installieren die Datenbanktreiber. ClickHouse, ArcadeDB und OpenBao benötigen keine zusätzlichen Pakete. Installieren Sie nur, was Sie brauchen, z. B. `ordivus[postgresql]`.
+The extras install the database drivers. ClickHouse, ArcadeDB and OpenBao need no additional packages. Install only what you need, e.g. `ordivus[postgresql]`.
 
-Als Container-Image (enthält alle Adapter, läuft als Nicht-Root-Benutzer mit schreibgeschütztem Dateisystem):
+As a container image (contains all adapters, runs as a non-root user with a read-only file system):
 
 ```sh
 git clone https://github.com/Xaner98/Ordivus.git && cd Ordivus
@@ -55,11 +55,11 @@ docker build -t ordivus .
 docker run --rm ordivus --version
 ```
 
-Für Kubernetes gibt es ein Helm Chart mit vorbereiteten Job-Vorlagen für `plan`, `drift` und `apply`: [docs/kubernetes.md](docs/kubernetes.md).
+For Kubernetes there is a Helm chart with prepared job templates for `plan`, `drift` and `apply`: [docs/kubernetes.md](docs/kubernetes.md).
 
-## Schnellstart
+## Quickstart
 
-Der [Schnellstart](docs/schnellstart.md) richtet in fünf Minuten eine PostgreSQL-Instanz in Docker ein und verwaltet darin einen Benutzer mit automatisch erzeugtem Passwort. Die Kurzfassung:
+The [quickstart](docs/quickstart.md) sets up a PostgreSQL instance in Docker in five minutes and manages a user with an automatically generated password in it. The short version:
 
 ```yaml
 # config/ordivus.yaml
@@ -95,26 +95,26 @@ spec:
 ```
 
 ```sh
-ordivus plan  -f config    # zeigt: CREATE_SECRET app, CREATE DatabaseUser app
-ordivus apply -f config    # erzeugt ./secrets/app und legt den Benutzer an
-ordivus apply -f config    # nichts mehr zu tun
+ordivus plan  -f config    # shows: CREATE_SECRET app, CREATE DatabaseUser app
+ordivus apply -f config    # creates ./secrets/app and creates the user
+ordivus apply -f config    # nothing left to do
 ```
 
-## Dokumentation
+## Documentation
 
-- [Konzepte](docs/konzepte.md) – zustandslos, additive/authoritative, unbekannt bleibt unbekannt, Passwörter
-- [Konfiguration](docs/konfiguration.md) – Aufbau der Dateien, Engine-Kinds, Operator Policy, Exit-Codes, Report-Format
-- [Schnellstart](docs/schnellstart.md)
-- [Kubernetes und CI/CD](docs/kubernetes.md) – Helm Chart, Job-Vorlagen, GitLab, Jenkins, Argo CD, Flux
-- Adapter: [PostgreSQL](docs/adapters/postgresql.md) · [MySQL](docs/adapters/mysql.md) · [ClickHouse](docs/adapters/clickhouse.md) · [ArcadeDB](docs/adapters/arcadedb.md) · [Redis](docs/adapters/redis.md) · [OpenBao](docs/adapters/openbao.md)
-- Secret-Quellen: [OpenBao KV v2](docs/credentials/openbao.md)
-- [Entwicklung und Beiträge](docs/entwicklung.md)
-- Beispiele: [`examples/`](examples/)
+- [Concepts](docs/concepts.md) – stateless, additive/authoritative, unknown stays unknown, passwords
+- [Configuration](docs/configuration.md) – file structure, engine kinds, operator policy, exit codes, report format
+- [Quickstart](docs/quickstart.md)
+- [Kubernetes and CI/CD](docs/kubernetes.md) – Helm chart, job templates, GitLab, Jenkins, Argo CD, Flux
+- Adapters: [PostgreSQL](docs/adapters/postgresql.md) · [MySQL](docs/adapters/mysql.md) · [ClickHouse](docs/adapters/clickhouse.md) · [ArcadeDB](docs/adapters/arcadedb.md) · [Redis](docs/adapters/redis.md) · [OpenBao](docs/adapters/openbao.md)
+- Secret sources: [OpenBao KV v2](docs/credentials/openbao.md)
+- [Development and contributing](docs/development.md)
+- Examples: [`examples/`](examples/)
 
-## Was Ordivus nicht ist
+## What Ordivus is not
 
-Kein Ersatz für Terraform, Helm, Ansible, Argo CD oder Flux; kein Secret Manager; kein Werkzeug für Schema-Migrationen oder Datenmigration; keine verteilte Transaktion über mehrere Systeme. Ordivus kümmert sich um den administrativen Sollzustand *innerhalb* Ihrer Systeme und arbeitet mit den Werkzeugen zusammen, die Sie schon haben.
+Not a replacement for Terraform, Helm, Ansible, Argo CD or Flux; not a secret manager; not a tool for schema migrations or data migration; not a distributed transaction across multiple systems. Ordivus takes care of the administrative desired state *inside* your systems and works together with the tools you already have.
 
-## Lizenz
+## License
 
 [Apache License 2.0](LICENSE)

@@ -1,6 +1,6 @@
-# Redis-Adapter
+# Redis adapter
 
-Verwaltet **ACL-Benutzer** in Redis 7 und neuer (getestet mit Redis 8) als Kind `DatabaseUser`.
+Manages **ACL users** in Redis 7 and newer (tested with Redis 8) as kind `DatabaseUser`.
 Installation: `pip install 'ordivus[redis]'` (redis-py ≥ 5).
 
 ## Target
@@ -14,29 +14,29 @@ spec:
   adapter: redis
   endpoint:
     host: redis.cache.svc.cluster.local
-    port: 6379              # Default 6379
-    tls:                    # vorhanden → TLS (rediss); ohne caFile gelten die System-CAs
+    port: 6379              # default 6379
+    tls:                    # present → TLS (rediss); without caFile the system CAs apply
       caFile: /trust/ca.pem
-  username: ordivus-admin   # ACL-Benutzer, als der Ordivus sich anmeldet; Default "default"
-  persist: aclSave          # none (Default) | aclSave | configRewrite
+  username: ordivus-admin   # ACL user Ordivus logs in as; default "default"
+  persist: aclSave          # none (default) | aclSave | configRewrite
   authentication:
-    credentialRef: redis-admin   # Passwort des Admin-Benutzers
+    credentialRef: redis-admin   # password of the admin user
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 |---|---|
-| `endpoint.host` | Pflicht |
+| `endpoint.host` | Required |
 | `endpoint.port` | Default `6379` |
-| `endpoint.tls.caFile` | CA-Datei; der Block `tls` schaltet TLS ein, Hostname wird geprüft |
-| `username` | Admin-Benutzer; Default `default` |
-| `persist` | siehe [Persistenz](#persistenz) |
+| `endpoint.tls.caFile` | CA file; the `tls` block enables TLS, the hostname is verified |
+| `username` | Admin user; default `default` |
+| `persist` | see [Persistence](#persistence) |
 
-`spec.scope` wird nicht unterstützt; Einschränkungen für den authoritative-Modus kommen aus der
+`spec.scope` is not supported; restrictions for authoritative mode come from the
 `ReconciliationPolicy` (`scope.DatabaseUser.glob`).
 
 ## Kind `DatabaseUser`
 
-`metadata.name` ist der Redis-Benutzername.
+`metadata.name` is the Redis user name.
 
 ```yaml
 apiVersion: ordivus.dev/v1alpha1
@@ -45,118 +45,118 @@ metadata:
   name: app-sessions
 spec:
   targetRef: cache-redis
-  enabled: true                               # Default true (ACL-Flag on/off)
-  keys: ["session:*", "%R~config:*"]          # Schlüsselmuster
-  channels: ["session-events"]                # Pub/Sub-Kanalmuster
+  enabled: true                               # default true (ACL flag on/off)
+  keys: ["session:*", "%R~config:*"]          # key patterns
+  channels: ["session-events"]                # Pub/Sub channel patterns
   commands: ["+@read", "+@write", "-@dangerous", "+ping"]
   credentials:
     credentialRef: app-sessions-password
     passwordPolicy: verify
 ```
 
-| Feld | Typ | Redis-Regel | Hinweise |
+| Field | Type | Redis rule | Notes |
 |---|---|---|---|
-| `enabled` | bool | `on` / `off` | Default `true`, wird immer verwaltet |
-| `keys` | Liste | `~muster`, `%R~muster`, `%W~muster` | `muster`, `~muster` und `%RW~muster` sind gleichbedeutend |
-| `channels` | Liste | `&muster` | ein führendes `&` ist optional |
-| `commands` | Liste | `+befehl`, `-befehl`, `+befehl\|sub`, `+@kategorie`, `allcommands`, `nocommands` | Groß-/Kleinschreibung egal |
-| `credentials` | – | `>passwort` | Engine-Feld, siehe [Passwörter](#passwörter) |
+| `enabled` | bool | `on` / `off` | Default `true`, always managed |
+| `keys` | List | `~pattern`, `%R~pattern`, `%W~pattern` | `pattern`, `~pattern` and `%RW~pattern` are equivalent |
+| `channels` | List | `&pattern` | a leading `&` is optional |
+| `commands` | List | `+command`, `-command`, `+command\|sub`, `+@category`, `allcommands`, `nocommands` | case-insensitive |
+| `credentials` | – | `>password` | Engine field, see [Passwords](#passwords) |
 
-`selectors` (Redis-7-Selektoren in Klammern) werden **nicht** unterstützt und bei der Validierung
-abgelehnt. Vorhandene Selektoren werden in der Discovery als Feld `selectors` angezeigt, aber nie
-verglichen oder verändert.
+`selectors` (Redis 7 selectors in parentheses) are **not** supported and are rejected during
+validation. Existing selectors are shown in discovery as the field `selectors`, but never
+compared or changed.
 
-### Nur deklarierte Felder
+### Declared fields only
 
-Wie überall in Ordivus gilt: ein nicht gesetztes Feld heißt **nicht** „zurücksetzen“. Ein
-`UPDATE` schreibt nur die geänderten Feldgruppen und setzt dabei genau diese Gruppe zurück:
+As everywhere in Ordivus: an unset field does **not** mean "reset". An
+`UPDATE` writes only the changed field groups and resets exactly those groups:
 
-| Feld | gesendete Regeln |
+| Field | rules sent |
 |---|---|
-| `enabled` | `on` bzw. `off` |
-| `keys` | `resetkeys` + Muster |
-| `channels` | `resetchannels` + Muster |
-| `commands` | `-@all` bzw. `+@all` + Regeln |
+| `enabled` | `on` or `off` |
+| `keys` | `resetkeys` + patterns |
+| `channels` | `resetchannels` + patterns |
+| `commands` | `-@all` or `+@all` + rules |
 
-Ist z. B. nur `commands` deklariert, bleiben Schlüssel- und Kanalmuster am Server unverändert.
-Das ist die sicherere Variante gegenüber `ACL SETUSER name reset …`, das bei jedem Update alle
-nicht deklarierten Rechte (und das Passwort) löschen würde.
+If, for example, only `commands` is declared, key and channel patterns on the server stay unchanged.
+This is safer than `ACL SETUSER name reset …`, which on every update would delete all
+undeclared permissions (and the password).
 
-Ausnahme **CREATE**: Ein neuer Benutzer wird mit `ACL SETUSER name reset <Regeln>` angelegt. Für
-nicht deklarierte Felder gilt dann der Redis-Default nach `reset`: keine Schlüssel, keine Befehle
-(`-@all`), Kanäle laut `acl-pubsub-default` (seit Redis 7: keine), kein Passwort (Anmeldung
-unmöglich), keine Selektoren.
+Exception **CREATE**: a new user is created with `ACL SETUSER name reset <rules>`. For
+undeclared fields, the Redis default after `reset` then applies: no keys, no commands
+(`-@all`), channels according to `acl-pubsub-default` (since Redis 7: none), no password (login
+impossible), no selectors.
 
-### Normalisierung
+### Normalization
 
-Redis fasst Regeln beim Speichern zusammen; `ACL GETUSER` liefert die zusammengefasste Form.
-Ordivus normalisiert Soll und Ist mit denselben Regeln, damit ein zweiter Lauf `NOOP` ergibt:
+Redis merges rules when storing them; `ACL GETUSER` returns the merged form.
+Ordivus normalizes desired and actual state with the same rules so that a second run yields `NOOP`:
 
-- `keys`: gleiche Muster werden zusammengeführt (`%R~a` + `%W~a` = `a`), Ergebnis sortiert.
-  `*` mit vollen Rechten ersetzt alle anderen Muster.
-- `channels`: Duplikate entfernt, sortiert; `*` ersetzt alle anderen.
-- `commands`: Reihenfolge bleibt (sie ist bedeutsam). Die Liste beginnt immer mit `-@all` (Default)
-  oder `+@all`. `allcommands`/`nocommands`/`+@all`/`-@all` verwerfen alle vorherigen Regeln; eine
-  Regel ersetzt frühere Regeln für denselben Befehl bzw. dieselbe Kategorie; `+config` ersetzt auch
-  frühere Regeln für `config|…`. Alles in Kleinbuchstaben.
+- `keys`: identical patterns are merged (`%R~a` + `%W~a` = `a`), result sorted.
+  `*` with full permissions replaces all other patterns.
+- `channels`: duplicates removed, sorted; `*` replaces all others.
+- `commands`: order is kept (it is significant). The list always starts with `-@all` (default)
+  or `+@all`. `allcommands`/`nocommands`/`+@all`/`-@all` discard all previous rules; a
+  rule replaces earlier rules for the same command or category; `+config` also replaces
+  earlier rules for `config|…`. Everything in lower case.
 
-Beispiel: `["+@read", "-get", "+get"]` wird zu `["-@all", "+@read", "+get"]`.
+Example: `["+@read", "-get", "+get"]` becomes `["-@all", "+@read", "+get"]`.
 
-Diese Nachbildung beruht auf beobachtetem Verhalten von Redis 8 und ist in den
-Integrationstests abgesichert. Fasst eine andere Version anders zusammen, zeigt `plan` dauerhaft ein
-`UPDATE` für `commands`; Abhilfe: Regeln in der Form deklarieren, die `ACL GETUSER` zurückgibt.
+This emulation is based on observed behavior of Redis 8 and is covered by the
+integration tests. If another version merges differently, `plan` permanently shows an
+`UPDATE` for `commands`; remedy: declare rules in the form `ACL GETUSER` returns.
 
-### Eingabeprüfung
+### Input validation
 
-Jede Regel geht als eigenes Argument an `ACL SETUSER` (kein Zusammenbauen von Strings). Zusätzlich:
+Each rule is passed to `ACL SETUSER` as a separate argument (no string concatenation). In addition:
 
-- Benutzernamen: nur ASCII-Buchstaben, Ziffern und `. _ @ : -`, Beginn mit Buchstabe oder Ziffer,
-  höchstens 128 Zeichen. Namen wie `>pw`, `#hash`, mit Leerzeichen oder Umlauten werden abgelehnt.
-- `commands`: nur die Formen aus der Tabelle oben. Regeln wie `>secret`, `nopass`, `on`, `reset`
-  sind damit ausgeschlossen.
-- `keys`/`channels`: keine Leer- oder Steuerzeichen. Unicode ist erlaubt. Ordivus setzt das Präfix
-  `~`/`&` selbst, deshalb bleiben Muster wie `>pw` oder `#x` wörtliche Muster und werden nie als
-  Passwort- oder Hash-Regel gelesen.
+- User names: only ASCII letters, digits and `. _ @ : -`, starting with a letter or digit,
+  at most 128 characters. Names such as `>pw`, `#hash`, or names with spaces or umlauts are rejected.
+- `commands`: only the forms from the table above. Rules such as `>secret`, `nopass`, `on`, `reset`
+  are thereby excluded.
+- `keys`/`channels`: no whitespace or control characters. Unicode is allowed. Ordivus sets the prefix
+  `~`/`&` itself, so patterns such as `>pw` or `#x` remain literal patterns and are never read as
+  a password or hash rule.
 
-## Passwörter
+## Passwords
 
-`spec.credentials` verwaltet genau ein Passwort pro Benutzer.
+`spec.credentials` manages exactly one password per user.
 
-- **Setzen** (`CREATE`, `SET_PASSWORD`): `resetpass` + `>passwort`; alle früheren Passwörter und
-  ein `nopass`-Flag werden entfernt.
-- **Prüfen** (`passwordPolicy: verify`): `ACL GETUSER` liefert SHA-256-Hashes der Passwörter.
-  Ordivus vergleicht `sha256(secret)` mit dieser Liste, **ohne Login-Versuch**. Ein Benutzer mit
-  `nopass` gilt als „Passwort weicht ab“ und bekommt ein `SET_PASSWORD`.
-- Die Hashes werden bei der Prüfung über die Session gelesen und nirgends gespeichert, auch nicht in
-  Reports oder Attributen.
+- **Set** (`CREATE`, `SET_PASSWORD`): `resetpass` + `>password`; all previous passwords and
+  a `nopass` flag are removed.
+- **Verify** (`passwordPolicy: verify`): `ACL GETUSER` returns SHA-256 hashes of the passwords.
+  Ordivus compares `sha256(secret)` with this list, **without a login attempt**. A user with
+  `nopass` counts as "password differs" and gets a `SET_PASSWORD`.
+- The hashes are read over the session during verification and stored nowhere, not even in
+  reports or attributes.
 
-## Geschützte Benutzer
+## Protected users
 
-`default` und der Benutzer aus `spec.username` sind Systemobjekte: nicht deklariert → `IGNORE`, nie
-gelöscht; deklariert → `BLOCKED`. Der Adapter verweigert Änderungen an ihnen auch
-direkt.
+`default` and the user from `spec.username` are system objects: not declared → `IGNORE`, never
+deleted; declared → `BLOCKED`. The adapter also refuses changes to them
+directly.
 
-## Privilegierte Rechte (`allowPrivilegedGrants`)
+## Privileged grants (`allowPrivilegedGrants`)
 
-Privilegiert ist jeder Befehl (auch Subcommand) der Redis-Kategorien **`@admin`** und
-**`@dangerous`**, wie der Server sie per `ACL CAT admin` / `ACL CAT dangerous` meldet – u. a.
+Privileged is every command (including subcommands) of the Redis categories **`@admin`** and
+**`@dangerous`**, as reported by the server via `ACL CAT admin` / `ACL CAT dangerous` – among others
 `config`, `acl`, `module`, `debug`, `shutdown`, `monitor`, `replicaof`/`slaveof`, `save`/`bgsave`,
-`flushall`/`flushdb`, `keys`, `sort`, `migrate`, `restore`, `cluster …`, `client kill`. Ordivus wertet
-die deklarierten `commands` in Reihenfolge aus (wie Redis); erlauben sie danach einen dieser Befehle,
-ist die Ressource ohne `allowPrivilegedGrants: true` `BLOCKED`. Das gilt für `+@all`/`allcommands`,
-`+@admin`, `+@dangerous`, einzelne Befehle wie `+config` und auch für Kategorien, die solche Befehle
-enthalten: `+@read` erlaubt `keys` und ist damit privilegiert, `+@read +@write -@dangerous` nicht.
-Eine Subcommand-Regel `+befehl|sub` ist privilegiert, sobald `befehl` privilegiert ist – auch wenn
-`ACL CAT` (wie bei Modulbefehlen, z. B. `ft.config`) nur den Befehl ohne Subcommands listet:
-`+ft.config|set`, `+config|set` und `+acl|setuser` sind ohne Freigabe `BLOCKED`.
+`flushall`/`flushdb`, `keys`, `sort`, `migrate`, `restore`, `cluster …`, `client kill`. Ordivus evaluates
+the declared `commands` in order (like Redis); if they then allow one of these commands,
+the resource is `BLOCKED` without `allowPrivilegedGrants: true`. This applies to `+@all`/`allcommands`,
+`+@admin`, `+@dangerous`, single commands such as `+config`, and also to categories that contain such commands:
+`+@read` allows `keys` and is therefore privileged, `+@read +@write -@dangerous` is not.
+A subcommand rule `+command|sub` is privileged as soon as `command` is privileged – even if
+`ACL CAT` (as with module commands, e.g. `ft.config`) lists only the command without subcommands:
+`+ft.config|set`, `+config|set` and `+acl|setuser` are `BLOCKED` without approval.
 
-Gesperrt werden nur **hinzukommende** Rechte: Hat ein bestehender Benutzer einen privilegierten
-Befehl schon, blockiert dessen Beibehaltung nicht. Nicht deklarierte Admin-Benutzer bleiben
-`UNMANAGED`. Lässt sich `ACL CAT` nicht lesen, ist die Ressource ebenfalls `BLOCKED`.
+Only **added** permissions are blocked: if an existing user already has a privileged
+command, keeping it does not block. Undeclared admin users stay
+`UNMANAGED`. If `ACL CAT` cannot be read, the resource is also `BLOCKED`.
 
-## Benötigte Rechte
+## Required privileges
 
-Der Admin-Benutzer braucht mindestens:
+The admin user needs at least:
 
 ```
 +ping +acl|users +acl|getuser            # plan/drift
@@ -165,39 +165,39 @@ Der Admin-Benutzer braucht mindestens:
 +info +config|rewrite                    # persist: configRewrite
 ```
 
-Für `plan`/`drift` reicht ein Benutzer mit den ersten drei Rechten. Unabhängig davon verweigert der
-Adapter jede Änderung über eine Read-only-Session.
+For `plan`/`drift`, a user with the first three permissions is sufficient. Independently of that, the
+adapter refuses every change over a read-only session.
 
-## Persistenz
+## Persistence
 
-Achtung: `ACL SETUSER`/`ACL DELUSER` ändern nur den **Speicher** von Redis. Nach einem Neustart sind
-die Änderungen weg, wenn sie nicht gesichert werden. `spec.persist` steuert, was Ordivus nach
-**jeder** Änderung tut:
+Caution: `ACL SETUSER`/`ACL DELUSER` change only Redis' **memory**. After a restart,
+the changes are gone unless they are saved. `spec.persist` controls what Ordivus does after
+**every** change:
 
-| Wert | Wirkung | Voraussetzung |
+| Value | Effect | Prerequisite |
 |---|---|---|
-| `none` (Default) | nichts; Persistenz liegt beim Betreiber | – |
-| `aclSave` | `ACL SAVE` | Server mit `aclfile` konfiguriert |
-| `configRewrite` | `CONFIG REWRITE` (Benutzer landen in `redis.conf`) | Server mit Konfigurationsdatei, ohne `aclfile` |
+| `none` (default) | nothing; persistence is up to the operator | – |
+| `aclSave` | `ACL SAVE` | server configured with `aclfile` |
+| `configRewrite` | `CONFIG REWRITE` (users end up in `redis.conf`) | server with a configuration file, without `aclfile` |
 
-Die Voraussetzung wird bei `apply` vor der ersten Änderung geprüft; fehlt sie, bricht der Lauf für
-dieses Target ab, ohne etwas zu ändern. `plan`/`drift` prüfen sie nicht.
+The prerequisite is checked during `apply` before the first change; if it is missing, the run aborts for
+this target without changing anything. `plan`/`drift` do not check it.
 
-Wird Redis aus einer ACL-Datei oder `redis.conf` gestartet, die Ordivus nicht schreibt (z. B. ein
-ConfigMap im Kubernetes), überschreibt der nächste Neustart die Änderungen. Dann muss die Quelle
-selbst gepflegt werden; Ordivus meldet die Abweichung beim nächsten `drift`.
+If Redis is started from an ACL file or `redis.conf` that Ordivus does not write (e.g. a
+ConfigMap in Kubernetes), the next restart overwrites the changes. In that case you must maintain the source
+itself; Ordivus reports the deviation on the next `drift`.
 
-## Einschränkungen
+## Limitations
 
-- Keine Selektoren, keine Flags außer `on`/`off` (z. B. `skip-sanitize-payload` wird nicht verwaltet).
-- Mehrere Passwörter pro Benutzer werden nicht unterstützt; `SET_PASSWORD` ersetzt alle.
-- Redis Cluster: ACLs sind pro Knoten. Jeder Knoten muss als eigenes Target konfiguriert werden.
-- Kein Lock: zwei gleichzeitige `apply`-Läufe gegen denselben Server sind nicht gegeneinander
-  abgesichert.
-- `verify` braucht `ACL GETUSER`; ist das nicht erlaubt, ist das Ergebnis `UNKNOWN` (kein Login-Fallback).
-- Ohne `tls` gilt die Verbindung als unsicher (Warnung, `insecureTransport: true`; mit Operator Policy
-  `requireTls: true` Abbruch, Exit-Code 11).
+- No selectors, no flags other than `on`/`off` (e.g. `skip-sanitize-payload` is not managed).
+- Multiple passwords per user are not supported; `SET_PASSWORD` replaces all of them.
+- Redis Cluster: ACLs are per node. Each node must be configured as a separate target.
+- No lock: two concurrent `apply` runs against the same server are not protected against
+  each other.
+- `verify` needs `ACL GETUSER`; if that is not allowed, the result is `UNKNOWN` (no login fallback).
+- Without `tls` the connection counts as insecure (warning, `insecureTransport: true`; with operator policy
+  `requireTls: true` abort, exit code 11).
 
 ## Valkey
 
-Valkey 7.2+/8 bietet dieselben ACL-Befehle und sollte funktionieren, ist aber **ungetestet**.
+Valkey 7.2+/8 offers the same ACL commands and should work, but is **untested**.

@@ -1,12 +1,12 @@
-# Credential Provider `openbao-kv-v2`
+# Credential provider `openbao-kv-v2`
 
-Liest und erzeugt verwaltete Passwörter in einer OpenBao-KV-v2-Secret-Engine. Der Provider ist
-unabhängig vom [Policy-Adapter `openbao`](../adapters/openbao.md): eigene Konfiguration, eigene
-Identität, eigene OpenBao-Policies.
+Reads and generates managed passwords in an OpenBao KV v2 secrets engine. The provider is
+independent of the [policy adapter `openbao`](../adapters/openbao.md): its own configuration, its own
+identity, its own OpenBao policies.
 
-Kompatibilität mit der KV-v2-API von HashiCorp Vault ist naheliegend, aber **nicht getestet**.
+Compatibility with the KV v2 API of HashiCorp Vault is likely, but **not tested**.
 
-## Konfiguration
+## Configuration
 
 ```yaml
 apiVersion: ordivus.dev/v1alpha1
@@ -16,10 +16,10 @@ metadata:
 spec:
   type: openbao-kv-v2
   endpoint: https://openbao.internal.example:8200
-  mount: secret            # Default: secret
-  namespace: team-a        # optional, Header X-Vault-Namespace
+  mount: secret            # default: secret
+  namespace: team-a        # optional, header X-Vault-Namespace
   tls:
-    caFile: /etc/ordivus/openbao-ca.pem   # optional, sonst System-CAs
+    caFile: /etc/ordivus/openbao-ca.pem   # optional, otherwise system CAs
   auth:
     method: kubernetes     # token | kubernetes | approle | jwt
     role: ordivus-apply
@@ -30,79 +30,79 @@ metadata:
   name: reporting-password
 spec:
   providerRef: central-openbao
-  path: tenants/acme/reporting   # KV-Pfad relativ zum Mount
+  path: tenants/acme/reporting   # KV path relative to the mount
 ```
 
-- **Ein Credential pro KV-Pfad** (F-04). Das Feld heißt fest `password`; weitere Felder im
-  Dokument werden nicht gelesen und nie geschrieben.
-- Pfadsegmente `.`/`..` und leere Segmente sind verboten.
-- `endpoint` mit `http://` markiert den Provider als *development-only*: ein Lauf verlangt dann
-  das Operator-Profil `development` (Klartext-HTTP nur für lokale Tests).
+- **One credential per KV path** (F-04). The field is always named `password`; other fields in the
+  document are never read and never written.
+- Path segments `.`/`..` and empty segments are forbidden.
+- An `endpoint` with `http://` marks the provider as *development-only*: a run then requires
+  the operator profile `development` (plain-text HTTP only for local tests).
 
-### Authentifizierung (`spec.auth`)
+### Authentication (`spec.auth`)
 
-| `method` | Felder | Login |
+| `method` | Fields | Login |
 |---|---|---|
-| `token` | `tokenFile` | Token aus Datei; **nie** inline in der Config |
-| `kubernetes` | `role`, `jwtFile` (Default `/var/run/secrets/kubernetes.io/serviceaccount/token`), `mount` (Default `kubernetes`) | `auth/<mount>/login` mit ServiceAccount-JWT (im Cluster, bevorzugt projizierte Tokens mit eigener Audience) |
-| `approle` | `roleId`, `secretIdFile`, `mount` (Default `approle`) | `auth/<mount>/login`; für CI/VMs außerhalb des Clusters |
-| `jwt` | `role`, `jwtFile`, `mount` (Default `jwt`) | `auth/<mount>/login`; z. B. CI-ID-Token (GitLab `id_tokens`, GitHub OIDC) außerhalb des Clusters |
+| `token` | `tokenFile` | Token from a file; **never** inline in the config |
+| `kubernetes` | `role`, `jwtFile` (default `/var/run/secrets/kubernetes.io/serviceaccount/token`), `mount` (default `kubernetes`) | `auth/<mount>/login` with ServiceAccount JWT (in the cluster, preferably projected tokens with their own audience) |
+| `approle` | `roleId`, `secretIdFile`, `mount` (default `approle`) | `auth/<mount>/login`; for CI/VMs outside the cluster |
+| `jwt` | `role`, `jwtFile`, `mount` (default `jwt`) | `auth/<mount>/login`; e.g. CI ID tokens (GitLab `id_tokens`, GitHub OIDC) outside the cluster |
 
-Der Login erfolgt erst beim ersten Zugriff; das Token lebt nur im Speicher des Laufs und wird
-nicht erneuert (Läufe sind kurz; TTL der Rolle entsprechend wählen). Tokens stehen nur im Header
-`X-Vault-Token`, nie in URLs, Logs oder Fehlermeldungen.
+Login happens only on first access; the token lives only in the memory of the run and is
+not renewed (runs are short; choose the role's TTL accordingly). Tokens appear only in the
+`X-Vault-Token` header, never in URLs, logs or error messages.
 
-## Zustände: present / absent / unknown / conflict
+## States: present / absent / unknown / conflict
 
-| Beobachtung | Zustand |
+| Observation | State |
 |---|---|
-| `GET <mount>/metadata/<path>` = 200, aktuelle Version weder gelöscht noch zerstört | `present` |
-| Metadata 404, `sys/internal/ui/mounts/<mount>` bestätigt KV v2 **und** `sys/capabilities-self` bestätigt `read` auf `<mount>/metadata/<path>` **und** `<mount>/data/<path>` | `absent` |
-| Metadata 404 auf einem KV-v1-Mount oder Mount-Typ nicht feststellbar | `unknown` |
-| Metadata 404 ohne bestätigtes Leserecht auf beiden Pfaden | `unknown` |
-| 403, 401, 5xx, Timeout, Netzwerk-/TLS-Fehler | `unknown` |
-| Metadata 200, aktuelle Version gelöscht (`deletion_time`) oder zerstört | `conflict` |
+| `GET <mount>/metadata/<path>` = 200, current version neither deleted nor destroyed | `present` |
+| Metadata 404, `sys/internal/ui/mounts/<mount>` confirms KV v2 **and** `sys/capabilities-self` confirms `read` on `<mount>/metadata/<path>` **and** `<mount>/data/<path>` | `absent` |
+| Metadata 404 on a KV v1 mount or mount type cannot be determined | `unknown` |
+| Metadata 404 without confirmed read permission on both paths | `unknown` |
+| 403, 401, 5xx, timeout, network/TLS error | `unknown` |
+| Metadata 200, current version deleted (`deletion_time`) or destroyed | `conflict` |
 
-Ein Rechtefehler ergibt nie `absent`. Bei `unknown` blockiert die Engine das Anlegen des
-Benutzers und fasst weder Secret noch Passwort an.
+A permission error never results in `absent`. With `unknown`, the engine blocks creating the
+user and touches neither the secret nor the password.
 
-**Gelöschte aktuelle Version:** Der Wert ist weg, `cas=0` würde scheitern, ein Neuanlegen mit
-höherer Version wäre ein stilles Überschreiben der Historie. Ordivus meldet deshalb die
-Credential-Op als `BLOCKED` („manual action required“, `apply` endet mit Exit-Code 11) und
-schreibt eine Warnung ins Log. Auflösung manuell: Version
-wiederherstellen (`undelete`) oder Metadaten bewusst löschen (`DELETE <mount>/metadata/<path>`),
-danach erkennt der nächste Lauf `absent`.
+**Deleted current version:** the value is gone, `cas=0` would fail, and re-creating it with a
+higher version would silently overwrite the history. Ordivus therefore reports the
+credential op as `BLOCKED` ("manual action required", `apply` ends with exit code 11) and
+writes a warning to the log. Resolve it manually: restore the version
+(`undelete`) or deliberately delete the metadata (`DELETE <mount>/metadata/<path>`);
+the next run then detects `absent`.
 
-## Erzeugen: create-if-absent mit CAS
+## Generation: create-if-absent with CAS
 
-Nur `apply` schreibt (`plan`/`drift` generieren nicht einmal einen Wert). Geschrieben wird mit
-`POST <mount>/data/<path>` und `options.cas = 0`: OpenBao akzeptiert das nur, wenn der Pfad noch
-keine Version hat. Bei einem CAS-Konflikt (paralleler Lauf war schneller) liest Ordivus den
-vorhandenen Wert und verwendet ihn – ein bestehendes Secret wird **nie** überschrieben.
+Only `apply` writes (`plan`/`drift` do not even generate a value). Writes use
+`POST <mount>/data/<path>` with `options.cas = 0`: OpenBao accepts this only if the path has no
+version yet. On a CAS conflict (a parallel run was faster), Ordivus reads the
+existing value and uses it – an existing secret is **never** overwritten.
 
-## Benötigte OpenBao-Policies
+## Required OpenBao policies
 
-Read-only-Identität (`plan`/`drift`, `passwordPolicy: verify` braucht den Wert):
+Read-only identity (`plan`/`drift`; `passwordPolicy: verify` needs the value):
 
 ```hcl
 path "secret/metadata/tenants/acme/*" { capabilities = ["read"] }
 path "secret/data/tenants/acme/*"     { capabilities = ["read"] }
 ```
 
-Apply-Identität (zusätzlich anlegen; kein `update`, kein `delete` nötig):
+Apply identity (additionally create; no `update`, no `delete` needed):
 
 ```hcl
 path "secret/metadata/tenants/acme/*" { capabilities = ["read"] }
 path "secret/data/tenants/acme/*"     { capabilities = ["read", "create"] }
 ```
 
-`sys/capabilities-self` ist über die eingebaute Policy `default` erlaubt; wer Tokens ohne
-`default` ausgibt, muss `path "sys/capabilities-self" { capabilities = ["update"] }` ergänzen –
-sonst bleibt jedes fehlende Secret `unknown`.
+`sys/capabilities-self` is allowed by the built-in `default` policy; if you issue tokens without
+`default`, you must add `path "sys/capabilities-self" { capabilities = ["update"] }` –
+otherwise every missing secret stays `unknown`.
 
-## Grenzen
+## Limitations
 
-- Nur KV v2, nur Feld `password`, keine Multi-Field-Dokumente.
-- Keine Token-Erneuerung, kein Lease-Handling.
-- Kein Retry; Netzwerkfehler sind `unknown` bzw. Abbruch des Ziels.
-- Der Grund für `unknown`/`conflict` steht als `reason` an der Credential-Op im Report.
+- KV v2 only, field `password` only, no multi-field documents.
+- No token renewal, no lease handling.
+- No retry; network errors are `unknown` or abort the target.
+- The reason for `unknown`/`conflict` is shown as `reason` on the credential op in the report.

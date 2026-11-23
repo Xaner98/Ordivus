@@ -1,62 +1,62 @@
-# Ordivus Helm Chart. Doku: docs/kubernetes.md
+# Ordivus Helm chart. Docs: docs/kubernetes.md
 
 image:
   repository: ghcr.io/EXAMPLE/ordivus
-  tag: ""          # Standard: appVersion
-  digest: ""       # "sha256:<64 hex>" hat Vorrang vor tag (empfohlen, im Profil hardened Pflicht)
+  tag: ""          # default: appVersion
+  digest: ""       # "sha256:<64 hex>" takes precedence over tag (recommended, required in profile hardened)
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# Ordivus-Konfiguration, read-only unter /config.
+# Ordivus configuration, read-only under /config.
 configuration:
-  source: configMap                 # configMap: vorhandene ConfigMap; inline: Chart erzeugt sie aus files
-  name: ordivus-configuration       # nur bei source=configMap
-  files: {}                         # nur bei source=inline: Dateiname -> Inhalt (YAML-String)
+  source: configMap                 # configMap: existing ConfigMap; inline: the chart creates it from files
+  name: ordivus-configuration       # only with source=configMap
+  files: {}                         # only with source=inline: file name -> content (YAML string)
 
-# Operator Policy, getrennt von der Konfiguration, read-only unter /policy.
-# --policy wird nur übergeben, wenn configMap oder secret gesetzt ist.
+# Operator policy, separate from the configuration, read-only under /policy.
+# --policy is only passed if configMap or secret is set.
 policy:
   configMap: ""
   secret: ""
   key: policy.yaml
 
-# Credentials-Verzeichnis (für CredentialProvider type=file), immer read-only eingehängt.
-# Volume-Quelle je Modus getrennt, damit plan/drift keine Apply-Credentials sehen.
-# Soll apply mit dem file-Provider neue Secrets schreiben: OpenBao-Provider verwenden oder ein
-# beschreibbares Volume ausdrücklich über jobs.templates.apply.extraVolumes/extraVolumeMounts einhängen.
+# Credentials directory (for CredentialProvider type=file), always mounted read-only.
+# Volume source separate per mode, so that plan/drift never see apply credentials.
+# If apply should write new secrets with the file provider: use the OpenBao provider or explicitly mount a
+# writable volume via jobs.templates.apply.extraVolumes/extraVolumeMounts.
 credentials:
   mountPath: /var/run/secrets/ordivus
-  readOnly: {}   # plan/drift, z. B. {secret: {secretName: ordivus-readonly-credentials}}
-  apply: {}      # apply,      z. B. {secret: {secretName: ordivus-apply-credentials}}
+  readOnly: {}   # plan/drift, e.g. {secret: {secretName: ordivus-readonly-credentials}}
+  apply: {}      # apply,      e.g. {secret: {secretName: ordivus-apply-credentials}}
 
 jobs:
-  # Suspendierte Vorlagen; Start per kubectl create job --from=cronjob/<release>-<mode> (scripts/run-job.sh).
+  # Suspended templates; start via kubectl create job --from=cronjob/<release>-<mode> (scripts/run-job.sh).
   templates:
     plan: &template
       enabled: true
       suspended: true
-      schedule: "0 0 1 1 *"         # Pflichtfeld, wirkungslos solange suspended
+      schedule: "0 0 1 1 *"         # required field, no effect while suspended
       automountServiceAccountToken: false
-      # Projiziertes, audience-gebundenes SA-Token, z. B. für OpenBao Kubernetes Auth.
+      # Projected, audience-bound SA token, e.g. for OpenBao Kubernetes auth.
       projectedToken:
         enabled: false
         audience: openbao
         expirationSeconds: 600
         mountPath: /var/run/secrets/tokens
       extraArgs: []
-      # Je Modus getrennt, damit Apply-Secrets nie in plan/drift landen.
+      # Separate per mode, so that apply secrets never end up in plan/drift.
       env: []
       extraVolumes: []
       extraVolumeMounts: []
     drift: *template
     apply:
       <<: *template
-      # Eigener Namespace für Apply-CronJob, Apply-ServiceAccount und Apply-Credentials
-      # (Standard: Release-Namespace). Siehe docs/kubernetes.md, Abschnitt Sicherheit.
+      # Separate namespace for the apply CronJob, apply ServiceAccount and apply credentials
+      # (default: release namespace). See docs/kubernetes.md, section Security.
       namespace: ""
-      # suspended: false wird nur mit allowSchedule: true akzeptiert (nie im Profil hardened).
+      # suspended: false is only accepted with allowSchedule: true (never in profile hardened).
       allowSchedule: false
-  # Optionaler, NICHT suspendierter Drift-CronJob mit Zeitplan.
+  # Optional, NOT suspended drift CronJob with a schedule.
   scheduledDrift:
     enabled: false
     schedule: "0 2 * * *"
@@ -72,30 +72,30 @@ jobs:
     extraVolumeMounts: []
 
 security:
-  # development | standard | hardened (hardened erzwingt u. a. digest, policy, networkPolicy und
-  # getrennten Apply-Namespace oder admission.enabled; Liste in docs/kubernetes.md)
+  # development | standard | hardened (hardened enforces, among others, digest, policy, networkPolicy and
+  # a separate apply namespace or admission.enabled; list in docs/kubernetes.md)
   profile: standard
   createServiceAccounts: true
   readOnlyServiceAccount: ordivus-readonly   # plan, drift, scheduledDrift
-  applyServiceAccount: ordivus-apply         # apply; muss sich vom readOnly-Namen unterscheiden
+  applyServiceAccount: ordivus-apply         # apply; must differ from the readOnly name
   serviceAccountAnnotations: {}
   networkPolicy:
     enabled: false
     dns:
-      # DNS nur zu diesen Pods (Port 53 UDP/TCP).
+      # DNS only to these pods (port 53 UDP/TCP).
       namespace: kube-system
       podSelector: {k8s-app: kube-dns}
-      # Zusätzliche DNS-Ziele per IP, z. B. NodeLocal DNSCache: [169.254.20.10/32]
+      # Additional DNS destinations by IP, e.g. NodeLocal DNSCache: [169.254.20.10/32]
       cidrs: []
-    # Erlaubter Egress zusätzlich zu DNS. Ohne except wird die Cloud-Metadaten-Adresse
-    # (169.254.169.254/32 bzw. fd00:ec2::254/128) ausgenommen, sofern sie im Block liegt.
+    # Allowed egress in addition to DNS. Without except, the cloud metadata address
+    # (169.254.169.254/32 or fd00:ec2::254/128) is excluded if it lies within the block.
     egress: []
     #  - cidr: 10.20.0.0/16
     #    ports: [5432, 8200]
-    #    except: []                 # optional, ersetzt die Standard-Ausnahmen
+    #    except: []                 # optional, replaces the default exclusions
 
-# Optionale ValidatingAdmissionPolicy (Kubernetes >= 1.30): Pods mit dem Apply-ServiceAccount im
-# Apply-Namespace nur, wenn sie der Apply-Vorlage entsprechen. Grenzen: docs/kubernetes.md.
+# Optional ValidatingAdmissionPolicy (Kubernetes >= 1.30): pods with the apply ServiceAccount in the
+# apply namespace only if they match the apply template. Limitations: docs/kubernetes.md.
 admission:
   enabled: false
 

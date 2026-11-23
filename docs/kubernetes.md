@@ -1,6 +1,6 @@
 # Kubernetes
 
-Ordivus läuft in Kubernetes als **Job**. Das Helm Chart `charts/ordivus` legt dafür drei **suspendierte CronJobs** als Vorlagen an – `<release>-plan`, `<release>-drift`, `<release>-apply`. Ein suspendierter CronJob läuft nie von selbst; jeder Lauf wird aus der Vorlage gestartet (`kubectl create job --from=cronjob/...`). Für einzelne Läufe ist also **kein `helm upgrade` nötig**.
+Ordivus runs in Kubernetes as a **Job**. For this, the Helm chart `charts/ordivus` creates three **suspended CronJobs** as templates – `<release>-plan`, `<release>-drift`, `<release>-apply`. A suspended CronJob never runs on its own; every run is started from the template (`kubectl create job --from=cronjob/...`). Individual runs therefore **do not need a `helm upgrade`**.
 
 ## Image
 
@@ -9,7 +9,7 @@ docker build -t ordivus:dev .
 docker run --rm --read-only ordivus:dev --version
 ```
 
-Das Image enthält die Engine und die Treiber für PostgreSQL, MySQL und Redis (ClickHouse, ArcadeDB und OpenBao brauchen keine Extras). Es läuft als UID/GID `10001`, schreibt nichts ins Root-Dateisystem (`readOnlyRootFilesystem`) und enthält weder Konfiguration noch Credentials, auch kein pip/setuptools. Das Basis-Image ist im `Dockerfile` per Digest gepinnt, Python-Abhängigkeiten kommen hash-geprüft aus `requirements.lock`, Debian-Sicherheitsupdates werden beim Build eingespielt (Pflege: [entwicklung.md](entwicklung.md#abhängigkeiten-und-lock-datei)). OCI-Labels setzen `--build-arg VERSION=…` und `--build-arg REVISION=$(git rev-parse HEAD)`.
+The image contains the engine and the drivers for PostgreSQL, MySQL and Redis (ClickHouse, ArcadeDB and OpenBao need no extras). It runs as UID/GID `10001`, writes nothing to the root file system (`readOnlyRootFilesystem`) and contains neither configuration nor credentials, nor pip/setuptools. The base image is pinned by digest in the `Dockerfile`, Python dependencies come hash-verified from `requirements.lock`, and Debian security updates are applied during the build (maintenance: [development.md](development.md#dependencies-and-lock-file)). OCI labels are set via `--build-arg VERSION=…` and `--build-arg REVISION=$(git rev-parse HEAD)`.
 
 ## Installation
 
@@ -21,69 +21,69 @@ helm install ordivus charts/ordivus -n platform-config \
   --set image.digest=sha256:…
 ```
 
-Die ConfigMap darf auch vom Chart erzeugt werden (`configuration.source: inline`, Dateien unter `configuration.files`). Für GitOps ist eine eigene ConfigMap meist besser, weil sie unabhängig vom Chart aktualisiert werden kann.
+The ConfigMap may also be created by the chart (`configuration.source: inline`, files under `configuration.files`). For GitOps, a separate ConfigMap is usually better because it can be updated independently of the chart.
 
-Die ConfigMap wird direkt unter `/config` eingehängt (ohne `subPath`). Die versteckten Verzeichnisse, über die Kubernetes die Dateien atomar austauscht (`..data`, `..<zeitstempel>`), überspringt der Config-Loader wie alle Pfade mit führendem Punkt.
+The ConfigMap is mounted directly under `/config` (without `subPath`). The hidden directories Kubernetes uses to swap the files atomically (`..data`, `..<timestamp>`) are skipped by the config loader, like all paths with a leading dot.
 
-**Grenze:** Eine ConfigMap fasst höchstens **1 MiB**. Größere Konfigurationen auf mehrere ConfigMaps verteilen (über `jobs.templates.<mode>.extraVolumes`/`extraVolumeMounts` unter `/config/<unterverzeichnis>` einhängen, je Modus) oder als Volume aus einer anderen Quelle bereitstellen.
+**Limit:** a ConfigMap holds at most **1 MiB**. Split larger configurations across multiple ConfigMaps (mount them via `jobs.templates.<mode>.extraVolumes`/`extraVolumeMounts` under `/config/<subdirectory>`, per mode) or provide them as a volume from another source.
 
-## Values im Überblick
+## Values overview
 
-| Value | Standard | Bedeutung |
+| Value | Default | Meaning |
 |---|---|---|
-| `image.repository` / `tag` / `digest` / `pullPolicy` | `ghcr.io/EXAMPLE/ordivus`, appVersion, leer, `IfNotPresent` | `digest` (`sha256:<64 hex>`) hat Vorrang vor `tag`. Für Produktion per Digest pinnen: ein Tag kann neu vergeben werden, ein Digest nicht; `IfNotPresent` ist dann unkritisch |
-| `configuration.source` | `configMap` | `configMap` (vorhandene, `configuration.name`) oder `inline` (`configuration.files`) |
-| `policy.configMap` / `policy.secret` / `policy.key` | leer / leer / `policy.yaml` | Operator Policy, getrennt von der Konfiguration unter `/policy`; `--policy` wird nur übergeben, wenn gesetzt |
-| `credentials.mountPath` | `/var/run/secrets/ordivus` | Verzeichnis für `CredentialProvider` `type: file`, immer read-only |
-| `credentials.readOnly` / `credentials.apply` | `{}` | Volume-Quelle je Modus, z. B. `{secret: {secretName: …}}`; plan/drift sehen nur `readOnly` |
-| `jobs.templates.<mode>.enabled` / `suspended` | `true` / `true` | Vorlagen für `plan`, `drift`, `apply` |
-| `jobs.templates.apply.allowSchedule` | `false` | `apply.suspended: false` wird nur damit akzeptiert (im Profil `hardened` nie) |
-| `jobs.templates.apply.namespace` | Release-Namespace | eigener Namespace für Apply-CronJob, Apply-ServiceAccount und Apply-Credentials (siehe [Sicherheit](#sicherheit)) |
-| `jobs.templates.<mode>.automountServiceAccountToken` | `false` | Kubernetes-Token je Modus |
-| `jobs.templates.<mode>.projectedToken` | aus | projiziertes, audience-gebundenes Token (z. B. OpenBao Kubernetes Auth), unter `mountPath/token` |
-| `jobs.templates.<mode>.extraArgs` | `[]` | zusätzliche CLI-Argumente, z. B. `["--fail-on", "actionable"]` |
-| `jobs.templates.<mode>.env` / `extraVolumes` / `extraVolumeMounts` | `[]` | **je Modus**; globale Varianten gibt es bewusst nicht, damit Apply-Secrets nie in plan/drift landen |
-| `jobs.scheduledDrift` | aus, `0 2 * * *` | zusätzlicher, **nicht** suspendierter Drift-CronJob `<release>-drift-scheduled` (eigene `env`/`extraVolumes`/`extraVolumeMounts`) |
-| `security.profile` | `standard` | `development`, `standard` oder `hardened` (Prüfungen siehe [Sicherheit](#sicherheit)) |
-| `security.readOnlyServiceAccount` / `applyServiceAccount` | `ordivus-readonly` / `ordivus-apply` | getrennte Identitäten, müssen sich unterscheiden; `createServiceAccounts: false` für vorhandene |
-| `security.networkPolicy` | aus | Egress nur zu DNS (`dns.namespace`/`dns.podSelector`, Standard `kube-system`/`k8s-app: kube-dns`, plus `dns.cidrs`, z. B. NodeLocal DNSCache `169.254.20.10/32`) und `egress[].cidr`/`ports` (TCP); Cloud-Metadaten-Adresse `169.254.169.254/32` bzw. `fd00:ec2::254/128` wird ausgenommen, wenn sie im Block liegt (eigene Liste: `egress[].except`) |
-| `admission.enabled` | `false` | ValidatingAdmissionPolicy für Pods mit dem Apply-ServiceAccount (Kubernetes ≥ 1.30) |
-| `execution.timeoutSeconds` / `backoffLimit` / `ttlSecondsAfterFinished` | `1800` / `0` / `86400` | `activeDeadlineSeconds`, keine Wiederholung, Aufräumen nach einem Tag |
-| `resources` | 100m/128Mi, Limits 1 CPU/512Mi/256Mi ephemeral-storage | wie üblich |
-| `nodeSelector`, `tolerations`, `affinity`, `imagePullSecrets` | | wie üblich |
+| `image.repository` / `tag` / `digest` / `pullPolicy` | `ghcr.io/EXAMPLE/ordivus`, appVersion, empty, `IfNotPresent` | `digest` (`sha256:<64 hex>`) takes precedence over `tag`. For production, pin by digest: a tag can be reassigned, a digest cannot; `IfNotPresent` is then harmless |
+| `configuration.source` | `configMap` | `configMap` (existing, `configuration.name`) or `inline` (`configuration.files`) |
+| `policy.configMap` / `policy.secret` / `policy.key` | empty / empty / `policy.yaml` | Operator policy, separate from the configuration under `/policy`; `--policy` is passed only if set |
+| `credentials.mountPath` | `/var/run/secrets/ordivus` | Directory for `CredentialProvider` `type: file`, always read-only |
+| `credentials.readOnly` / `credentials.apply` | `{}` | Volume source per mode, e.g. `{secret: {secretName: …}}`; plan/drift see only `readOnly` |
+| `jobs.templates.<mode>.enabled` / `suspended` | `true` / `true` | Templates for `plan`, `drift`, `apply` |
+| `jobs.templates.apply.allowSchedule` | `false` | `apply.suspended: false` is accepted only with this (never in the `hardened` profile) |
+| `jobs.templates.apply.namespace` | release namespace | Separate namespace for the apply CronJob, apply ServiceAccount and apply credentials (see [Security](#security)) |
+| `jobs.templates.<mode>.automountServiceAccountToken` | `false` | Kubernetes token per mode |
+| `jobs.templates.<mode>.projectedToken` | off | Projected, audience-bound token (e.g. OpenBao Kubernetes auth), under `mountPath/token` |
+| `jobs.templates.<mode>.extraArgs` | `[]` | Additional CLI arguments, e.g. `["--fail-on", "actionable"]` |
+| `jobs.templates.<mode>.env` / `extraVolumes` / `extraVolumeMounts` | `[]` | **Per mode**; there are deliberately no global variants, so that apply secrets never end up in plan/drift |
+| `jobs.scheduledDrift` | off, `0 2 * * *` | Additional, **non**-suspended drift CronJob `<release>-drift-scheduled` (own `env`/`extraVolumes`/`extraVolumeMounts`) |
+| `security.profile` | `standard` | `development`, `standard` or `hardened` (checks see [Security](#security)) |
+| `security.readOnlyServiceAccount` / `applyServiceAccount` | `ordivus-readonly` / `ordivus-apply` | Separate identities, must differ; `createServiceAccounts: false` for existing ones |
+| `security.networkPolicy` | off | Egress only to DNS (`dns.namespace`/`dns.podSelector`, default `kube-system`/`k8s-app: kube-dns`, plus `dns.cidrs`, e.g. NodeLocal DNSCache `169.254.20.10/32`) and `egress[].cidr`/`ports` (TCP); the cloud metadata address `169.254.169.254/32` or `fd00:ec2::254/128` is excluded if it lies within the block (own list: `egress[].except`) |
+| `admission.enabled` | `false` | ValidatingAdmissionPolicy for pods with the apply ServiceAccount (Kubernetes ≥ 1.30) |
+| `execution.timeoutSeconds` / `backoffLimit` / `ttlSecondsAfterFinished` | `1800` / `0` / `86400` | `activeDeadlineSeconds`, no retry, cleanup after one day |
+| `resources` | 100m/128Mi, limits 1 CPU/512Mi/256Mi ephemeral-storage | as usual |
+| `nodeSelector`, `tolerations`, `affinity`, `imagePullSecrets` | | as usual |
 
-Jeder Pod läuft mit `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, Seccomp `RuntimeDefault`, `enableServiceLinks: false` und `restartPolicy: Never`; die CronJobs haben `concurrencyPolicy: Forbid`. Ein `emptyDir` unter `/tmp` steht für temporäre Dateien bereit. Der Container wird mit `<mode> -f /config --format json` aufgerufen: Logs und Report landen als JSON-Zeilen im Pod-Log, der Report ist die Zeile mit `"type":"report"`.
+Every pod runs with `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, seccomp `RuntimeDefault`, `enableServiceLinks: false` and `restartPolicy: Never`; the CronJobs have `concurrencyPolicy: Forbid`. An `emptyDir` under `/tmp` is available for temporary files. The container is invoked with `<mode> -f /config --format json`: logs and report end up as JSON lines in the pod log; the report is the line with `"type":"report"`.
 
-Der `file`-Provider kann im read-only eingehängten Credentials-Verzeichnis keine neuen Secrets anlegen. Wenn `apply` Passwörter erzeugen soll, für das Apply-Credential einen OpenBao-Provider verwenden oder ausdrücklich ein beschreibbares Volume (z. B. `emptyDir` oder PVC) über `jobs.templates.apply.extraVolumes`/`extraVolumeMounts` einhängen – ein `emptyDir` verliert neue Secrets mit dem Pod.
+The `file` provider cannot create new secrets in the read-only mounted credentials directory. If `apply` is supposed to generate passwords, use an OpenBao provider for the apply credential or explicitly mount a writable volume (e.g. `emptyDir` or PVC) via `jobs.templates.apply.extraVolumes`/`extraVolumeMounts` – an `emptyDir` loses new secrets together with the pod.
 
-## Läufe starten
+## Starting runs
 
-Direkt mit kubectl:
+Directly with kubectl:
 
 ```sh
 kubectl -n platform-config create job --from=cronjob/ordivus-plan ordivus-plan-$(date +%s)
 ```
 
-Für Pipelines gibt es `scripts/run-job.sh`. Es erzeugt genau einen Job, wartet auf das Ende, legt die Logs unter `reports/<mode>.log` und den Report unter `reports/<mode>.json` ab und endet mit dem **Exit-Code des Ordivus-Containers** (0, 10, 11 … wie in [konfiguration.md](konfiguration.md#exit-codes)).
+For pipelines there is `scripts/run-job.sh`. It creates exactly one job, waits for it to finish, stores the logs under `reports/<mode>.log` and the report under `reports/<mode>.json`, and exits with the **exit code of the Ordivus container** (0, 10, 11 … as in [configuration.md](configuration.md#exit-codes)).
 
 ```sh
-scripts/run-job.sh plan platform-config                                    # Release "ordivus"
-ORDIVUS_KUBE_CONTEXT=prod scripts/run-job.sh apply platform-config-apply my-release  # Apply-Namespace
+scripts/run-job.sh plan platform-config                                    # release "ordivus"
+ORDIVUS_KUBE_CONTEXT=prod scripts/run-job.sh apply platform-config-apply my-release  # apply namespace
 ```
 
-| Variable | Standard | Bedeutung |
+| Variable | Default | Meaning |
 |---|---|---|
-| `ORDIVUS_KUBE_CONTEXT` | aktueller Kontext | kubectl-Kontext (`--context`); für `apply` **Pflicht** (sonst Exit 2), damit kein Apply gegen einen zufällig aktiven Kontext läuft. Kontext und Namespace werden immer ausgegeben |
-| `ORDIVUS_RUN_ID` | `CI_JOB_ID`, sonst `BUILD_TAG`, sonst UTC-Zeitstempel | Teil des Job-Namens `<release>-<mode>-<id>`; wird DNS-1123-konform gemacht und auf 63 Zeichen gekürzt |
-| `ORDIVUS_TIMEOUT` | `2100` | Sekunden, die das Skript wartet; danach Exit 1, der Job läuft weiter bis `activeDeadlineSeconds` |
-| `ORDIVUS_REPORT_DIR` | `reports` | Ablage für Report und Logs |
-| `KUBECTL` | `kubectl` | Pfad zu kubectl |
+| `ORDIVUS_KUBE_CONTEXT` | current context | kubectl context (`--context`); **required** for `apply` (otherwise exit 2), so that no apply runs against a context that just happens to be active. Context and namespace are always printed |
+| `ORDIVUS_RUN_ID` | `CI_JOB_ID`, else `BUILD_TAG`, else UTC timestamp | Part of the job name `<release>-<mode>-<id>`; made DNS-1123-compliant and truncated to 63 characters |
+| `ORDIVUS_TIMEOUT` | `2100` | Seconds the script waits; afterwards exit 1, the job keeps running until `activeDeadlineSeconds` |
+| `ORDIVUS_REPORT_DIR` | `reports` | Location for report and logs |
+| `KUBECTL` | `kubectl` | Path to kubectl |
 
-Vor dem Start löscht das Skript `<mode>.json` und `<mode>.log` eines früheren Laufs. Der Report wird nur abgelegt, wenn das Log **genau eine** Report-Zeile enthält: mit `jq` eine Zeile, die gültiges JSON mit `"type":"report"` und `schemaVersion` ist, ohne `jq` eine Zeile, die exakt mit `{"type":"report","schemaVersion":"…",` beginnt und mit `}` endet (Logs der Engine haben diese Form nie; eine Anwendungs-Logzeile genau dieser Form würde mitgezählt); sonst meldet das Skript das und endet mit 1, außer der Container ist ohnehin mit einem Fehler-Exit-Code beendet worden (dieser bleibt erhalten). Logs, Report und Exit-Code stammen vom jüngsten Pod des Jobs; meldet Kubernetes den Job als `Failed`, der Container aber 0, endet das Skript mit 1.
+Before starting, the script deletes `<mode>.json` and `<mode>.log` from a previous run. The report is stored only if the log contains **exactly one** report line: with `jq`, a line that is valid JSON with `"type":"report"` and `schemaVersion`; without `jq`, a line that starts exactly with `{"type":"report","schemaVersion":"…",` and ends with `}` (engine logs never have this form; an application log line of exactly this form would be counted); otherwise the script reports this and exits with 1, unless the container has already exited with an error exit code anyway (which is preserved). Logs, report and exit code come from the job's most recent pod; if Kubernetes reports the job as `Failed` but the container exited with 0, the script exits with 1.
 
-Endet der Job ohne Exit-Code des Containers (z. B. `activeDeadlineSeconds` überschritten, Image nicht ladbar), endet das Skript mit 1. Bei Abbruch (SIGINT/SIGTERM) sammelt es die bisherigen Logs ein und löscht den Job; Ordivus erhält dann SIGTERM.
+If the job ends without a container exit code (e.g. `activeDeadlineSeconds` exceeded, image not pullable), the script exits with 1. On abort (SIGINT/SIGTERM), it collects the logs so far and deletes the job; Ordivus then receives SIGTERM.
 
-Die CI-Identität braucht im jeweiligen Namespace: `create` auf `jobs`, `get` auf `cronjobs` und `jobs`, `list` auf `pods`, `get` auf `pods/log`, `delete` auf `jobs`. Mit getrenntem Apply-Namespace (`jobs.templates.apply.namespace`) dafür **zwei** Identitäten mit je einer RoleBinding anlegen: die Plan-/Drift-Identität (z. B. für Merge-Request-Pipelines) nur im Release-Namespace, die Apply-Identität (nur geschützte Branches/manuelle Freigabe) nur im Apply-Namespace. Eine Rolle mit diesen Rechten im Apply-Namespace ist gleichbedeutend mit Apply-Rechten auf alle Zielsysteme.
+The CI identity needs in the respective namespace: `create` on `jobs`, `get` on `cronjobs` and `jobs`, `list` on `pods`, `get` on `pods/log`, `delete` on `jobs`. With a separate apply namespace (`jobs.templates.apply.namespace`), create **two** identities for this, each with one RoleBinding: the plan/drift identity (e.g. for merge request pipelines) only in the release namespace, the apply identity (protected branches/manual approval only) only in the apply namespace. A role with these permissions in the apply namespace is equivalent to apply permissions on all target systems.
 
 ### GitLab CI
 
@@ -125,41 +125,41 @@ stage('Ordivus drift') {
 }
 ```
 
-Exit-Code 10 (Drift über der Schwelle aus `--fail-on`) lässt den Stage fehlschlagen. Wer ihn nur als Warnung will: `sh(script: '...', returnStatus: true)` auswerten.
+Exit code 10 (drift above the threshold from `--fail-on`) fails the stage. If you want it only as a warning: evaluate `sh(script: '...', returnStatus: true)`.
 
-## Konfigurationsversionen
+## Configuration versions
 
-Die Vorlagen mounten die ConfigMap, die beim Start des Jobs vorliegt. Die Pipeline muss also erst die ConfigMap aktualisieren (oder GitOps synchronisieren lassen) und danach den Lauf starten. Welche Konfiguration ein Lauf verwendet hat, steht als `configDigest` im Report.
+The templates mount the ConfigMap that exists when the job starts. The pipeline must therefore first update the ConfigMap (or let GitOps sync it) and only then start the run. Which configuration a run used is recorded as `configDigest` in the report.
 
-## Argo CD und Flux
+## Argo CD and Flux
 
-- Argo CD bzw. Flux (HelmRelease) verwalten Chart, ConfigMap und CronJob-Vorlagen. Ein **Sync startet keinen Lauf**: suspendierte CronJobs werden durch ein Reconcile weder ausgelöst noch nachgeholt. Läufe startet ein externer Trigger (Pipeline mit `run-job.sh`) oder `jobs.scheduledDrift`.
-- `suspend` nicht über GitOps-Overrides auf `false` setzen: Je nach Kubernetes-Version und `startingDeadlineSeconds` können verpasste Termine sofort nachgeholt werden.
-- Argo-CD-`PreSync`/`Sync`-Hooks mit eigenem Job-Manifest sind möglich, gehören aber nicht zum Chart.
-- **Flux `driftDetection`** vergleicht die Kubernetes-Objekte der HelmRelease mit dem Cluster. Das ist **nicht** `ordivus drift`, das PostgreSQL, OpenBao usw. prüft.
+- Argo CD or Flux (HelmRelease) manage the chart, ConfigMap and CronJob templates. A **sync does not start a run**: suspended CronJobs are neither triggered nor caught up by a reconcile. Runs are started by an external trigger (pipeline with `run-job.sh`) or `jobs.scheduledDrift`.
+- Do not set `suspend` to `false` via GitOps overrides: depending on the Kubernetes version and `startingDeadlineSeconds`, missed schedules may be caught up immediately.
+- Argo CD `PreSync`/`Sync` hooks with their own job manifest are possible but are not part of the chart.
+- **Flux `driftDetection`** compares the Kubernetes objects of the HelmRelease with the cluster. That is **not** `ordivus drift`, which checks PostgreSQL, OpenBao etc.
 
-## Sicherheit
+## Security
 
-- **Wer Jobs anlegen darf, gehört zur Trust Boundary.** Kubernetes-RBAC kann `create jobs` nicht auf „nur aus dieser Vorlage“ beschränken; `resourceNames` wirkt bei `create` nicht. Wer Jobs (oder Pods, Deployments, CronJobs …) im Namespace anlegen darf, kann einen eigenen Pod mit dem Apply-ServiceAccount und dessen Credentials starten.
-- Deshalb: Job-Create-Rechte nur an vertrauenswürdige CI-Identitäten; Workload-Erstellung über alle Pfade einschränken. Das Chart bietet zwei Bausteine, das Profil `hardened` verlangt mindestens einen:
-  - **Eigener Apply-Namespace** (`jobs.templates.apply.namespace`): Apply-CronJob und Apply-ServiceAccount liegen dort; Apply-Credentials-Secret, Konfigurations-ConfigMap (bei `configuration.source: configMap`) und Policy müssen ebenfalls dort existieren (bei `source: inline` legt das Chart die ConfigMap in beiden Namespaces an, die NetworkPolicy ebenso). Wer nur im Release-Namespace Workloads anlegen darf, erreicht Apply-Identität und -Credentials nicht mehr. RoleBindings getrennt je Namespace vergeben (siehe [Läufe starten](#läufe-starten)). Das Chart wird weiterhin in den Release-Namespace installiert; die Helm-Identität braucht Rechte in beiden Namespaces.
-  - **ValidatingAdmissionPolicy** (`admission.enabled`, Kubernetes ≥ 1.30, cluster-weit, die Helm-Identität braucht Rechte auf `admissionregistration.k8s.io`): Pods mit dem Apply-ServiceAccount im Apply-Namespace werden nur zugelassen, wenn sie die Labels der Apply-Vorlage tragen, von einem Job `<release>-apply-*` kontrolliert werden und ihr Pod-Spec der gerenderten Apply-Vorlage entspricht:
-    - **Pod-Spec und Container enthalten nur Felder, die die Vorlage setzt**, plus die Felder, die API-Server und Standard-Admission-Plugins vor der Prüfung ergänzen – mit genau deren Standardwerten (`dnsPolicy: ClusterFirst`, `schedulerName: default-scheduler`, `serviceAccount` = Apply-ServiceAccount, `priority`/`preemptionPolicy`, die `NoExecute`-Tolerations für `not-ready`/`unreachable`, `terminationMessagePath`/`terminationMessagePolicy`). Damit abgelehnt: `command`, `envFrom`, `workingDir`, `ports`, Probes, `lifecycle`-Hooks, weitere Container, Init- und Ephemeral-Container (`kubectl debug`), `hostAliases`, `dnsConfig`, `nodeName`, `runtimeClassName`, `priorityClassName`, `shareProcessNamespace`, `hostNetwork`/`hostPID`/`hostIPC` usw.
-    - **Exakt gleich** der Vorlage: `securityContext` von Pod und Container; `nodeSelector` und `affinity` fehlen oder sind exakt gleich; `tolerations` nur die der Vorlage oder die oben genannten Standard-Tolerations.
-    - **Mindestens die Werte der Vorlage** (zusätzliche Unterschlüssel bleiben erlaubt, damit API-Defaults wie `defaultMode` passen): Image, Argumente, `env`, `volumeMounts`, `volumes` (Anzahl und Quelle je Volume fest; z. B. `subPath` oder `items` sind möglich), ServiceAccount, `automountServiceAccountToken`, `restartPolicy`, `enableServiceLinks`, `terminationGracePeriodSeconds`, `imagePullSecrets`.
-  - **Grenzen der Admission-Policy:** CEL kann nicht nachschlagen, ob der besitzende Job wirklich vom CronJob stammt; eine Kopie der Vorlage mit gefälschter `ownerReference` wird zugelassen. Sie startet einen echten `apply`-Lauf mit Apply-Credentials – zu einem beliebigen Zeitpunkt, auch parallel zu anderen Läufen und ohne Pipeline. Nicht geprüft werden `resources` (Requests/Limits), Annotations und zusätzliche Labels sowie die erlaubten Unterschlüssel oben; Pod Security Admission `restricted` auf dem Apply-Namespace bleibt als zweite Linie empfohlen. Mutierende Webhooks oder Plugins, die weitere Pod-Felder setzen (z. B. Sidecar-Injection), führen zur Ablehnung auch legitimer Apply-Pods. `pods/exec` und `pods/attach` sind keine Pod-Änderung und bleiben Sache von RBAC. Wer CronJob, ConfigMap oder Policy im Apply-Namespace ändern darf, ändert, was apply tut. Die Policy bildet den Stand der letzten Helm-Installation ab; nach Änderungen an der Vorlage außerhalb von Helm lehnt sie Apply-Pods ab.
-- Prüfungen beim Rendern in **jedem** Profil: Read-only- und Apply-ServiceAccount müssen verschieden heißen; `jobs.templates.apply.suspended: false` nur mit `allowSchedule: true`.
-- Zusätzlich im Profil **`hardened`**: `image.digest` im Format `sha256:<64 hex>`, eine Policy, `networkPolicy.enabled`, kein `automountServiceAccountToken: true` in irgendeinem Modus, jede Egress-Regel mit `ports` und ohne `0.0.0.0/0`/`::/0`, Apply-Vorlage suspendiert, eigener Apply-Namespace oder `admission.enabled`.
-- `concurrencyPolicy: Forbid` gilt nur für Jobs, die der CronJob-Controller selbst startet, nicht für manuell erzeugte. Zwei gleichzeitige `apply`-Läufe verhindert das Chart nicht.
-- plan/drift laufen mit `ordivus-readonly` und sehen nur `credentials.readOnly`; die Zielsystem-Rechte dieser Credentials sollten ebenfalls nur lesend sein.
-- Kubernetes-Token werden standardmäßig nicht gemountet. Für OpenBao Kubernetes Auth `projectedToken` im betroffenen Modus aktivieren statt `automountServiceAccountToken: true`.
-- `ttlSecondsAfterFinished` löscht Jobs samt Logs. Reports, die als Audit-Nachweis dienen, archiviert die Pipeline (`reports/`).
+- **Whoever may create jobs is part of the trust boundary.** Kubernetes RBAC cannot restrict `create jobs` to "only from this template"; `resourceNames` has no effect on `create`. Whoever may create jobs (or pods, deployments, CronJobs …) in the namespace can start their own pod with the apply ServiceAccount and its credentials.
+- Therefore: grant job create permissions only to trusted CI identities; restrict workload creation across all paths. The chart offers two building blocks; the `hardened` profile requires at least one:
+  - **Separate apply namespace** (`jobs.templates.apply.namespace`): the apply CronJob and apply ServiceAccount live there; the apply credentials secret, the configuration ConfigMap (with `configuration.source: configMap`) and the policy must also exist there (with `source: inline`, the chart creates the ConfigMap in both namespaces, and likewise the NetworkPolicy). Whoever may create workloads only in the release namespace can no longer reach the apply identity and credentials. Grant RoleBindings separately per namespace (see [Starting runs](#starting-runs)). The chart is still installed into the release namespace; the Helm identity needs permissions in both namespaces.
+  - **ValidatingAdmissionPolicy** (`admission.enabled`, Kubernetes ≥ 1.30, cluster-wide, the Helm identity needs permissions on `admissionregistration.k8s.io`): pods with the apply ServiceAccount in the apply namespace are admitted only if they carry the labels of the apply template, are controlled by a job `<release>-apply-*` and their pod spec matches the rendered apply template:
+    - **Pod spec and container contain only fields the template sets**, plus the fields that the API server and standard admission plugins add before the check – with exactly their default values (`dnsPolicy: ClusterFirst`, `schedulerName: default-scheduler`, `serviceAccount` = apply ServiceAccount, `priority`/`preemptionPolicy`, the `NoExecute` tolerations for `not-ready`/`unreachable`, `terminationMessagePath`/`terminationMessagePolicy`). This rejects: `command`, `envFrom`, `workingDir`, `ports`, probes, `lifecycle` hooks, additional containers, init and ephemeral containers (`kubectl debug`), `hostAliases`, `dnsConfig`, `nodeName`, `runtimeClassName`, `priorityClassName`, `shareProcessNamespace`, `hostNetwork`/`hostPID`/`hostIPC` etc.
+    - **Exactly equal** to the template: `securityContext` of pod and container; `nodeSelector` and `affinity` are absent or exactly equal; `tolerations` only those of the template or the standard tolerations named above.
+    - **At least the values of the template** (additional subkeys remain allowed so that API defaults such as `defaultMode` fit): image, arguments, `env`, `volumeMounts`, `volumes` (number and source per volume fixed; e.g. `subPath` or `items` are possible), ServiceAccount, `automountServiceAccountToken`, `restartPolicy`, `enableServiceLinks`, `terminationGracePeriodSeconds`, `imagePullSecrets`.
+  - **Limits of the admission policy:** CEL cannot look up whether the owning job really comes from the CronJob; a copy of the template with a forged `ownerReference` is admitted. It starts a real `apply` run with apply credentials – at any time, also in parallel with other runs and without a pipeline. Not checked are `resources` (requests/limits), annotations and additional labels, as well as the allowed subkeys above; Pod Security Admission `restricted` on the apply namespace remains recommended as a second line of defense. Mutating webhooks or plugins that set further pod fields (e.g. sidecar injection) lead to rejection of legitimate apply pods as well. `pods/exec` and `pods/attach` are not pod changes and remain a matter for RBAC. Whoever may change the CronJob, ConfigMap or policy in the apply namespace changes what apply does. The policy reflects the state of the last Helm installation; after changes to the template outside of Helm, it rejects apply pods.
+- Checks at render time in **every** profile: the read-only and apply ServiceAccounts must have different names; `jobs.templates.apply.suspended: false` only with `allowSchedule: true`.
+- Additionally in the **`hardened`** profile: `image.digest` in the format `sha256:<64 hex>`, a policy, `networkPolicy.enabled`, no `automountServiceAccountToken: true` in any mode, every egress rule with `ports` and without `0.0.0.0/0`/`::/0`, apply template suspended, separate apply namespace or `admission.enabled`.
+- `concurrencyPolicy: Forbid` applies only to jobs the CronJob controller starts itself, not to manually created ones. The chart does not prevent two concurrent `apply` runs.
+- plan/drift run with `ordivus-readonly` and see only `credentials.readOnly`; the target system permissions of these credentials should also be read-only.
+- Kubernetes tokens are not mounted by default. For OpenBao Kubernetes auth, enable `projectedToken` in the affected mode instead of `automountServiceAccountToken: true`.
+- `ttlSecondsAfterFinished` deletes jobs including their logs. Reports that serve as audit evidence are archived by the pipeline (`reports/`).
 
-## Lokal testen (Docker Desktop)
+## Testing locally (Docker Desktop)
 
-Docker Desktop liefert lokal gebaute Images beim Pull an den Cluster aus; `imagePullPolicy: Never` funktioniert dort **nicht**, `IfNotPresent` oder `Always` schon.
+Docker Desktop serves locally built images to the cluster on pull; `imagePullPolicy: Never` does **not** work there, `IfNotPresent` or `Always` does.
 
 ```sh
-tests/e2e/run.sh                  # nur helm lint/template
-ORDIVUS_E2E=1 tests/e2e/run.sh    # zusätzlich Installation im Kontext docker-desktop, Namespaces ordivus-e2e und ordivus-e2e-apply
+tests/e2e/run.sh                  # helm lint/template only
+ORDIVUS_E2E=1 tests/e2e/run.sh    # additionally install in context docker-desktop, namespaces ordivus-e2e and ordivus-e2e-apply
 ```

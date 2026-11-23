@@ -1,5 +1,5 @@
-# ArcadeDB: Graph-Datenbank für das Analytics-Team, ein Schreib- und ein Lese-Benutzer.
-# Admin-Passwort (root) und Benutzerpasswörter liegen als Dateien in /var/run/ordivus/secrets.
+# ArcadeDB: graph database for the analytics team, one write user and one read user.
+# Admin password (root) and user passwords are stored as files in /var/run/ordivus/secrets.
 apiVersion: ordivus.dev/v1alpha1
 kind: CredentialProvider
 metadata:

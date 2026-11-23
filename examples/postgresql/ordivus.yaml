@@ -1,4 +1,4 @@
-# Beispiel: Analytics-Datenbank mit Leserolle, Anwendungsuser und Grants.
+# Example: analytics database with a read role, application user and grants.
 apiVersion: ordivus.dev/v1alpha1
 kind: Target
 metadata:

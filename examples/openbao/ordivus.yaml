@@ -1,6 +1,6 @@
-# OpenBao in zwei getrennten Rollen:
-#  1. Credential Provider (KV v2) für das Passwort eines verwalteten Benutzers (Fake-Adapter als Platzhalter)
-#  2. Zielsystem für ACL-Policies (Adapter "openbao") mit eigenem Admin-Token aus einer Datei
+# OpenBao in two separate roles:
+#  1. Credential provider (KV v2) for the password of a managed user (fake adapter as placeholder)
+#  2. Target system for ACL policies (adapter "openbao") with its own admin token from a file
 apiVersion: ordivus.dev/v1alpha1
 kind: CredentialProvider
 metadata:
@@ -44,7 +44,7 @@ spec:
   credentials:
     credentialRef: reporting-password
 ---
-# Getrennte Identität für die Policy-Verwaltung: Token kommt aus einer gemounteten Datei.
+# Separate identity for policy management: the token comes from a mounted file.
 apiVersion: ordivus.dev/v1alpha1
 kind: CredentialProvider
 metadata:

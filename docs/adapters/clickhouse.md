@@ -1,10 +1,10 @@
-# ClickHouse-Adapter
+# ClickHouse adapter
 
-Adapter-ID `clickhouse`. Verwaltet Datenbanken, Rollen, Benutzer und Grants über **SQL-basiertes Access Management** (`CREATE USER`, `GRANT` …) und das HTTP-Interface von ClickHouse. Keine zusätzliche Python-Abhängigkeit.
+Adapter ID `clickhouse`. Manages databases, roles, users and grants via **SQL-driven access management** (`CREATE USER`, `GRANT` …) and the ClickHouse HTTP interface. No additional Python dependency.
 
-Kinds in Ausführungsreihenfolge: `Database`, `DatabaseRole`, `DatabaseUser`, `Grant` (Löschungen in umgekehrter Reihenfolge).
+Kinds in execution order: `Database`, `DatabaseRole`, `DatabaseUser`, `Grant` (deletions in reverse order).
 
-Ein vollständiges Beispiel liegt in [`examples/clickhouse/`](../../examples/clickhouse/ordivus.yaml).
+A complete example is in [`examples/clickhouse/`](../../examples/clickhouse/ordivus.yaml).
 
 ## Target
 
@@ -16,35 +16,35 @@ spec:
   adapter: clickhouse
   endpoint:
     host: clickhouse.data-platform.svc.cluster.local
-    port: 8443            # Default 8123 (http) bzw. 8443 (mit tls)
-    user: ordivus         # Default "default"; darf kein ':' enthalten
+    port: 8443            # Default 8123 (http) or 8443 (with tls)
+    user: ordivus         # Default "default"; must not contain ':'
     timeoutSeconds: 30    # Default 30
-    tls:                  # vorhanden ⇒ https mit Zertifikatsprüfung
-      caFile: /trust/ca.pem   # optional, sonst System-CAs
+    tls:                  # present ⇒ https with certificate verification
+      caFile: /trust/ca.pem   # optional, otherwise system CAs
   authentication:
-    credentialRef: clickhouse-admin   # Passwort des Benutzers endpoint.user
+    credentialRef: clickhouse-admin   # Password of user endpoint.user
   scope:
     databases:
       include: ["reporting*"]         # Glob; optional
 ```
 
-- Anmeldung per HTTP Basic Auth im Header; SQL steht ausschließlich im POST-Body, nie in der URL.
-- `host` ist ein reiner Hostname bzw. eine IP-Adresse (kein `/`, `@`, `?`, `#`, Leerzeichen). Redirects folgt Ordivus nie (Basic-Auth-Header gingen sonst an das Redirect-Ziel); ein Redirect ist ein Fehler.
-- Fehler werden über den Header `X-ClickHouse-Exception-Code` eingeordnet: Rechte-/Anmeldefehler (497, 516, 192) → `AuthorizationError` (Kind `forbidden`), Timeouts/Netz/Überlast → `TransientError`, alles andere → `PermanentError`.
-- `plan` und `drift` senden bei **jeder** Anfrage die Einstellung `readonly=2`; ClickHouse lehnt dann jedes DDL/DCL ab (Code 164 `READONLY`). Zusätzlich verweigert der Adapter `apply` auf einer Read-only-Session.
+- Login via HTTP Basic Auth in the header; SQL is sent only in the POST body, never in the URL.
+- `host` is a plain hostname or IP address (no `/`, `@`, `?`, `#`, spaces). Ordivus never follows redirects (the Basic Auth header would otherwise go to the redirect target); a redirect is an error.
+- Errors are classified via the `X-ClickHouse-Exception-Code` header: permission/login errors (497, 516, 192) → `AuthorizationError` (kind `forbidden`), timeouts/network/overload → `TransientError`, everything else → `PermanentError`.
+- `plan` and `drift` send the setting `readonly=2` with **every** request; ClickHouse then rejects any DDL/DCL (code 164 `READONLY`). In addition, the adapter refuses `apply` on a read-only session.
 
 ## Kind `Database`
 
 ```yaml
 kind: Database
 metadata:
-  name: reporting          # Datenbankname
+  name: reporting          # Database name
 spec:
   targetRef: analytics-clickhouse
-  engine: Atomic           # optional, nur beim Anlegen
+  engine: Atomic           # optional, only on creation
 ```
 
-`engine` ist ein reiner Engine-Name ohne Parameter (`Atomic`, `Memory`, `Lazy` …). Eine abweichende Engine an einer bestehenden Datenbank erscheint im Plan als `UPDATE` und scheitert im `apply` mit „engine is create-only“; Ordivus baut Datenbanken nie um. **`DELETE` einer Datenbank ist `DROP DATABASE` und löscht alle Tabellen darin.**
+`engine` is a plain engine name without parameters (`Atomic`, `Memory`, `Lazy` …). A different engine on an existing database appears in the plan as `UPDATE` and fails in `apply` with "engine is create-only"; Ordivus never rebuilds databases. **`DELETE` of a database is `DROP DATABASE` and deletes all tables in it.**
 
 ## Kind `DatabaseRole`
 
@@ -56,7 +56,7 @@ spec:
   targetRef: analytics-clickhouse
 ```
 
-Keine weiteren Felder. Rollen, die an andere Rollen vergeben sind, werden nicht modelliert.
+No further fields. Roles granted to other roles are not modeled.
 
 ## Kind `DatabaseUser`
 
@@ -66,8 +66,8 @@ metadata:
   name: reporting_app
 spec:
   targetRef: analytics-clickhouse
-  roles: [reporting_reader]          # vergebene Rollen (GRANT role TO user)
-  defaultRoles: [reporting_reader]   # beim Login aktive Rollen; [] = NONE
+  roles: [reporting_reader]          # granted roles (GRANT role TO user)
+  defaultRoles: [reporting_reader]   # roles active at login; [] = NONE
   hostIp: ["10.0.0.0/8"]             # HOST IP …
   hostNames: ["app.example"]         # HOST NAME …
   credentials:
@@ -75,100 +75,100 @@ spec:
     passwordPolicy: verify
 ```
 
-Alle Felder sind optional; nicht angegebene Felder werden nicht verwaltet (nie zurückgesetzt).
+All fields are optional; fields you omit are not managed (never reset).
 
-- `roles`: Änderungen werden als `GRANT`/`REVOKE` der Differenz ausgeführt.
-- `defaultRoles`: verglichen wird die effektive Menge aus `system.role_grants.granted_role_is_default`. Ohne Angabe gilt ClickHouse-Standard `DEFAULT ROLE ALL`.
-- `hostIp`/`hostNames`: Listen, sortiert verglichen. `::/0` bedeutet „von überall“ (ClickHouse speichert `ANY` so; eine Liste mit `::/0` wird zu `["::/0"]` normalisiert). Ändert sich eines der Felder, wird die gesamte Host-Liste neu gesetzt; nicht deklarierte Einträge (auch `REGEXP`/`LIKE`) bleiben dabei erhalten. Adressen werden schon bei der Validierung geprüft. Ohne Angabe wird ein neuer Benutzer mit `HOST ANY` angelegt.
-- Ein neuer Benutzer wird zuerst mit `HOST NONE` angelegt und erst danach freigeschaltet, damit er nie kurz von überall erreichbar ist.
+- `roles`: changes are applied as `GRANT`/`REVOKE` of the difference.
+- `defaultRoles`: the effective set from `system.role_grants.granted_role_is_default` is compared. If omitted, the ClickHouse default `DEFAULT ROLE ALL` applies.
+- `hostIp`/`hostNames`: lists, compared sorted. `::/0` means "from anywhere" (ClickHouse stores `ANY` this way; a list containing `::/0` is normalized to `["::/0"]`). If either field changes, the entire host list is set anew; undeclared entries (including `REGEXP`/`LIKE`) are preserved. Addresses are checked during validation. If omitted, a new user is created with `HOST ANY`.
+- A new user is first created with `HOST NONE` and only enabled afterwards, so it is never briefly reachable from anywhere.
 
-### Passwörter
+### Passwords
 
-- Passwörter werden als `IDENTIFIED WITH sha256_password BY '…'` gesetzt. Das Statement enthält außer Name und Passwort keine variablen Teile: ClickHouse maskiert Passwörter in `system.query_log` und im Server-Log, **außer** ein Statement scheitert schon beim Parsen – dann stünde es im Klartext im Log.
-- `passwordPolicy: verify` prüft per Anmeldeversuch (`SELECT 1` als dieser Benutzer, ebenfalls mit `readonly=2`): Fehler 516 `AUTHENTICATION_FAILED` ⇒ falsches Passwort (`SET_PASSWORD`), Erfolg ⇒ passt, alles andere ⇒ `UNKNOWN`.
-  **Achtung:** Ist der Benutzer per `hostIp`/`hostNames` auf Adressen beschränkt, von denen Ordivus nicht kommt, meldet ClickHouse ebenfalls 516. Dann würde bei jedem Lauf `SET_PASSWORD` geplant. In diesem Fall `passwordPolicy: set-on-create` oder `enforce` verwenden.
-- Ein Benutzer **ohne** `spec.credentials` wird mit einem zufälligen, nirgends gespeicherten Passwort angelegt (nicht mit `no_password`); anmelden kann er sich erst, wenn jemand ein Passwort setzt.
-- Benutzernamen mit `:` lassen sich per Basic Auth nicht prüfen (`UNKNOWN`).
+- Passwords are set as `IDENTIFIED WITH sha256_password BY '…'`. Apart from name and password, the statement contains no variable parts: ClickHouse masks passwords in `system.query_log` and in the server log, **unless** a statement already fails during parsing – then it would appear in plaintext in the log.
+- `passwordPolicy: verify` checks by attempting a login (`SELECT 1` as this user, also with `readonly=2`): error 516 `AUTHENTICATION_FAILED` ⇒ wrong password (`SET_PASSWORD`), success ⇒ matches, anything else ⇒ `UNKNOWN`.
+  **Caution:** If the user is restricted via `hostIp`/`hostNames` to addresses Ordivus does not connect from, ClickHouse also reports 516. Then `SET_PASSWORD` would be planned on every run. In that case use `passwordPolicy: set-on-create` or `enforce`.
+- A user **without** `spec.credentials` is created with a random password that is stored nowhere (not with `no_password`); it can only log in once someone sets a password.
+- User names containing `:` cannot be verified via Basic Auth (`UNKNOWN`).
 
 ## Kind `Grant`
 
 ```yaml
 kind: Grant
 metadata:
-  name: reporting-reader-select   # frei wählbar, nicht Teil des Schlüssels
+  name: reporting-reader-select   # free choice, not part of the key
 spec:
   targetRef: analytics-clickhouse
-  grantee: reporting_reader       # Benutzer oder Rolle
-  database: reporting             # optional; ohne Angabe *.*
-  table: events                   # optional, nur mit database
+  grantee: reporting_reader       # user or role
+  database: reporting             # optional; if omitted *.*
+  table: events                   # optional, only with database
   privileges: [SELECT, SHOW TABLES]
 ```
 
-Ein Grant-Objekt ist die Menge der Privilegien eines Grantees auf genau einem Objekt. Die ID im Report lautet z. B. `` `reporting_reader` ON `reporting`.* ``. Weichen die Privilegien ab, werden nur die Differenzen per `GRANT`/`REVOKE` geändert.
+A grant object is the set of privileges of one grantee on exactly one object. The ID in the report is e.g. `` `reporting_reader` ON `reporting`.* ``. If the privileges differ, only the differences are changed via `GRANT`/`REVOKE`.
 
-**Normalisierung und Fallstricke:** ClickHouse speichert Privilegien in einer eigenen Form (`system.grants`) – Gruppen werden aufgefächert, vollständige Gruppen wieder zusammengefasst. Ordivus vergleicht Großschreibung mit einfachen Leerzeichen, sortiert und ohne Duplikate. Damit der Vergleich stabil ist:
+**Normalization and pitfalls:** ClickHouse stores privileges in its own form (`system.grants`) – groups are expanded, complete groups are collapsed again. Ordivus compares uppercase with single spaces, sorted and without duplicates. To keep the comparison stable:
 
-- Privilegien so angeben, wie `SHOW GRANTS` sie zeigt. Wer z. B. alle vier `SHOW …`-Unterrechte einzeln deklariert, erhält dauerhaft ein `UPDATE`, weil ClickHouse sie zu `SHOW` zusammenfasst.
-- `ALL`/`ALL PRIVILEGES`, `NONE`/`USAGE`/`NO PRIVILEGES` und `CURRENT GRANTS` werden bei der Validierung immer abgelehnt: sie expandieren serverseitig (`CURRENT GRANTS` = alle Rechte des Ordivus-Logins, also Vollzugriff inklusive Benutzerverwaltung).
-- Grants auf die Systemdatenbanken `system`, `information_schema` und `INFORMATION_SCHEMA` werden immer abgelehnt.
-- Unbekannte Privilegnamen (nicht in `system.privileges`, auch nicht als Alias) sind `BLOCKED`.
-- Quellenrechte wie `FILE`, `S3`, `URL` speichert ClickHouse 25.x als `READ`/`WRITE` auf dem jeweiligen Quellobjekt; die Discovery modelliert das Quellobjekt nicht, solche Grants enden nach dem Anlegen als `unverified`.
-- Spalten-Grants (`SELECT(col)`), Teil-Revokes und `WITH GRANT OPTION` modelliert der Adapter nicht. Solche Einträge erscheinen als eigene, nicht änderbare Objekte (`manageable: false`) mit Zusatz in der ID, z. B. `(with grant option)`, und werden nie gelöscht.
-- Privilegien von Rollen, die ein Benutzer erbt, gehören zur Rolle, nicht zum Benutzer.
+- Specify privileges the way `SHOW GRANTS` shows them. If you, for example, declare all four `SHOW …` sub-privileges individually, you get a permanent `UPDATE`, because ClickHouse collapses them into `SHOW`.
+- `ALL`/`ALL PRIVILEGES`, `NONE`/`USAGE`/`NO PRIVILEGES` and `CURRENT GRANTS` are always rejected during validation: they expand server-side (`CURRENT GRANTS` = all permissions of the Ordivus login, i.e. full access including user management).
+- Grants on the system databases `system`, `information_schema` and `INFORMATION_SCHEMA` are always rejected.
+- Unknown privilege names (not in `system.privileges`, not even as an alias) are `BLOCKED`.
+- Source privileges such as `FILE`, `S3`, `URL` are stored by ClickHouse 25.x as `READ`/`WRITE` on the respective source object; discovery does not model the source object, so such grants end up as `unverified` after creation.
+- The adapter does not model column grants (`SELECT(col)`), partial revokes and `WITH GRANT OPTION`. Such entries appear as separate, non-changeable objects (`manageable: false`) with a suffix in the ID, e.g. `(with grant option)`, and are never deleted.
+- Privileges a user inherits from roles belong to the role, not to the user.
 
-## Privilegierte Rechte (`allowPrivilegedGrants`)
+## Privileged permissions (`allowPrivilegedGrants`)
 
-Ohne die Operator-Policy `allowPrivilegedGrants: true` sind folgende Deklarationen `BLOCKED` (in `apply` Exit 11). Geprüft wird im Plan gegen `system.privileges` des Servers, d. h. Aliase (`SHUTDOWN`, `INTROSPECTION FUNCTIONS` …) und alle Unterrechte einer Gruppe zählen mit:
+Without the operator policy `allowPrivilegedGrants: true`, the following declarations are `BLOCKED` (exit 11 in `apply`). The check runs in the plan against the server's `system.privileges`, i.e. aliases (`SHUTDOWN`, `INTROSPECTION FUNCTIONS` …) and all sub-privileges of a group count as well:
 
-- Gruppen samt allen Unterrechten: `ACCESS MANAGEMENT` (u. a. `CREATE/ALTER/DROP USER`, `CREATE/ALTER/DROP ROLE`, `ROLE ADMIN`, Row Policies, Quotas, Settings-Profile, `SHOW ACCESS`), `SYSTEM` (alle `SYSTEM …`), `SOURCES`, `READ`/`WRITE` (Quellen), `INTROSPECTION`, `NAMED COLLECTION ADMIN` (u. a. `SHOW NAMED COLLECTIONS SECRETS`), `displaySecretsInShowAndSelect`, `KILL QUERY`, `KILL TRANSACTION`, `SET DEFINER`, `CLUSTER`, `TABLE ENGINE`, `MOVE PARTITION BETWEEN SHARDS`, `CREATE FUNCTION`, `DROP FUNCTION`.
-- Jedes direkte Unterrecht von `ALL` auf globaler Ebene, also alle Quellen wie `FILE`, `URL`, `REMOTE`, `S3`, `HDFS`, `MYSQL`, `POSTGRES`, `JDBC`, `KAFKA` … (auch künftige).
-- Jeder globale Grant (`*.*`, also ohne `database`), auch `SELECT`.
-- `DatabaseUser.roles`/`defaultRoles` mit einer Rolle, die (direkt oder über andere Rollen) einen privilegierten oder globalen Grant, einen Grant auf einer Systemdatenbank (`system`, `information_schema`/`INFORMATION_SCHEMA`) oder `WITH GRANT OPTION` trägt, oder die der Ordivus-Login selbst hat.
+- Groups including all sub-privileges: `ACCESS MANAGEMENT` (including `CREATE/ALTER/DROP USER`, `CREATE/ALTER/DROP ROLE`, `ROLE ADMIN`, row policies, quotas, settings profiles, `SHOW ACCESS`), `SYSTEM` (all `SYSTEM …`), `SOURCES`, `READ`/`WRITE` (sources), `INTROSPECTION`, `NAMED COLLECTION ADMIN` (including `SHOW NAMED COLLECTIONS SECRETS`), `displaySecretsInShowAndSelect`, `KILL QUERY`, `KILL TRANSACTION`, `SET DEFINER`, `CLUSTER`, `TABLE ENGINE`, `MOVE PARTITION BETWEEN SHARDS`, `CREATE FUNCTION`, `DROP FUNCTION`.
+- Every direct sub-privilege of `ALL` at the global level, i.e. all sources such as `FILE`, `URL`, `REMOTE`, `S3`, `HDFS`, `MYSQL`, `POSTGRES`, `JDBC`, `KAFKA` … (including future ones).
+- Every global grant (`*.*`, i.e. without `database`), including `SELECT`.
+- `DatabaseUser.roles`/`defaultRoles` with a role that (directly or via other roles) carries a privileged or global grant, a grant on a system database (`system`, `information_schema`/`INFORMATION_SCHEMA`) or `WITH GRANT OPTION`, or that the Ordivus login itself has.
 
-Immer gesperrt, auch mit `allowPrivilegedGrants`: Grants an den Ordivus-Login und an seine Rollen, unbekannte Privilegien und alles außerhalb des Scopes (siehe unten). `WITH GRANT OPTION` modelliert der Adapter nicht.
+Always blocked, even with `allowPrivilegedGrants`: grants to the Ordivus login and to its roles, unknown privileges and everything outside the scope (see below). The adapter does not model `WITH GRANT OPTION`.
 
-## Discovery und Scope
+## Discovery and scope
 
-| Kind | Quelle |
+| Kind | Source |
 |---|---|
 | `Database` | `system.databases` |
 | `DatabaseRole` | `system.roles` (`storage`) |
 | `DatabaseUser` | `system.users` (`storage`, `host_*`), `system.role_grants` |
 | `Grant` | `system.grants` |
 
-`spec.scope.databases.include` (Globs) beschränkt `Database` und datenbankbezogene Grants. Ist ein Scope gesetzt, gehören globale Grants (`*.*`) **nicht** dazu: sie werden weder inventarisiert noch angelegt. Deklarierte Datenbanken und Grants außerhalb des Scopes sind im Plan `BLOCKED` („outside spec.scope.databases“), `apply` verweigert sie zusätzlich selbst – sonst entstünden Objekte, die die Discovery nie sieht. Benutzer und Rollen sind nicht datenbankgebunden und werden über `ReconciliationPolicy.spec.scope.DatabaseUser`/`DatabaseRole` (exact/glob) eingegrenzt. Fehlen die Rechte für eine Systemtabelle, ist das Kind `forbidden`, nie „leer“.
+`spec.scope.databases.include` (globs) restricts `Database` and database-scoped grants. If a scope is set, global grants (`*.*`) are **not** part of it: they are neither inventoried nor created. Declared databases and grants outside the scope are `BLOCKED` in the plan ("outside spec.scope.databases"), and `apply` itself refuses them as well – otherwise objects would be created that discovery never sees. Users and roles are not bound to a database and are restricted via `ReconciliationPolicy.spec.scope.DatabaseUser`/`DatabaseRole` (exact/glob). If the permissions for a system table are missing, the kind is `forbidden`, never "empty".
 
-## Geschützte Systemobjekte
+## Protected system objects
 
-- Datenbanken `system`, `information_schema`, `INFORMATION_SCHEMA`, `default` sind Systemobjekte (`IGNORE`, nie gelöscht).
-- Der Benutzer, als der Ordivus verbunden ist (`currentUser()`), seine Rollen (auch transitiv über andere Rollen) und deren Grants sind Systemobjekte – Schutz vor Selbstaussperrung: nie entzogen, gelöscht oder geändert.
-- Benutzer und Rollen aus Konfigurationsdateien sind nicht änderbar (siehe unten).
+- Databases `system`, `information_schema`, `INFORMATION_SCHEMA`, `default` are system objects (`IGNORE`, never deleted).
+- The user Ordivus is connected as (`currentUser()`), its roles (including transitively via other roles) and their grants are system objects – protection against self-lockout: never revoked, deleted or changed.
+- Users and roles from configuration files cannot be changed (see below).
 
-## users.xml-Verwaltung wird nicht empfohlen
+## users.xml management is not recommended
 
-Benutzer, Rollen und Rechte aus den Server-Konfigurationsdateien (`users.xml`, `users.d/`) lassen sich per SQL nicht ändern. Ordivus empfiehlt diese Art der Verwaltung **ausdrücklich nicht**; verwenden Sie SQL-basiertes Access Management (`access_management`, Storage `local_directory` oder `replicated`).
+Users, roles and permissions from the server configuration files (`users.xml`, `users.d/`) cannot be changed via SQL. Ordivus **explicitly does not** recommend this kind of management; use SQL-driven access management (`access_management`, storage `local_directory` or `replicated`).
 
-Der Adapter erkennt die Herkunft über die Spalte `storage` in `system.users`/`system.roles`. Nur `local_directory` und `replicated` gelten als änderbar; alles andere (`users_xml` …) bekommt `manageable: false`:
+The adapter detects the origin via the `storage` column in `system.users`/`system.roles`. Only `local_directory` and `replicated` count as changeable; everything else (`users_xml` …) gets `manageable: false`:
 
-| Situation | Ergebnis |
+| Situation | Result |
 |---|---|
-| nicht deklariert, additive | `UNMANAGED` |
-| nicht deklariert, authoritative im Scope | `UNDESIRABLE` („not manageable by adapter“), **nie `DELETE`**, auch mit `allowDelete` |
-| deklariert | `BLOCKED` („not manageable by adapter“), nie stilles `NOOP` |
-| Grants solcher Benutzer/Rollen | ebenfalls `manageable: false` |
+| not declared, additive | `UNMANAGED` |
+| not declared, authoritative in scope | `UNDESIRABLE` ("not manageable by adapter"), **never `DELETE`**, even with `allowDelete` |
+| declared | `BLOCKED` ("not manageable by adapter"), never a silent `NOOP` |
+| grants of such users/roles | also `manageable: false` |
 
-Die Engine meldet eine Deklaration solcher Objekte immer als `BLOCKED`, auch wenn alle Felder übereinstimmen.
+The engine always reports a declaration of such objects as `BLOCKED`, even if all fields match.
 
-Typischer Fall: der per `CLICKHOUSE_USER` im offiziellen Container angelegte Admin. Für Ordivus legt man besser einen eigenen SQL-Benutzer an (siehe Rechte) und verbindet sich als dieser.
+Typical case: the admin created via `CLICKHOUSE_USER` in the official container. For Ordivus, it is better to create a dedicated SQL user (see permissions) and connect as that user.
 
-## Benötigte Rechte
+## Required permissions
 
-Der Verbindungsbenutzer braucht:
+The connection user needs:
 
-- Lesen: `SHOW USERS, SHOW ROLES` (bzw. `SHOW ACCESS`) und Zugriff auf `system.databases`, `system.users`, `system.roles`, `system.role_grants`, `system.grants`, `system.privileges` (für die Rechteprüfung im Plan).
-- Schreiben: `ACCESS MANAGEMENT` (bzw. `CREATE/ALTER/DROP USER`, `CREATE/DROP ROLE`, `ROLE ADMIN`), `CREATE DATABASE`, `DROP DATABASE` (nur für Löschungen) und jedes Privileg, das er vergeben soll, **`WITH GRANT OPTION`**.
+- Read: `SHOW USERS, SHOW ROLES` (or `SHOW ACCESS`) and access to `system.databases`, `system.users`, `system.roles`, `system.role_grants`, `system.grants`, `system.privileges` (for the permission check in the plan).
+- Write: `ACCESS MANAGEMENT` (or `CREATE/ALTER/DROP USER`, `CREATE/DROP ROLE`, `ROLE ADMIN`), `CREATE DATABASE`, `DROP DATABASE` (only for deletions) and every privilege it is to grant, **`WITH GRANT OPTION`**.
 
-Beispiel (als Admin mit `access_management`):
+Example (as admin with `access_management`):
 
 ```sql
 CREATE USER ordivus IDENTIFIED WITH sha256_password BY '…';
@@ -177,10 +177,10 @@ GRANT CURRENT GRANTS ON *.* TO ordivus WITH GRANT OPTION;
 
 ## Cluster
 
-`ON CLUSTER` wird **noch nicht** unterstützt. Ein Target ist genau ein Knoten. Per SQL angelegte Benutzer existieren ohne `ON CLUSTER` nur auf diesem Knoten – außer der Cluster nutzt **replizierten Access Storage** (`user_directories/replicated` über Keeper); dann wirkt ein Target auf einen Knoten für alle. Ohne replizierten Storage muss jeder Knoten als eigenes Target konfiguriert werden; abweichende Knoten meldet Ordivus derzeit nicht als Cluster-Drift. Datenbanken werden ebenfalls nur auf dem verbundenen Knoten angelegt (oder über `Replicated`-Datenbank-Engine).
+`ON CLUSTER` is **not yet** supported. A target is exactly one node. Without `ON CLUSTER`, users created via SQL exist only on that node – unless the cluster uses **replicated access storage** (`user_directories/replicated` via Keeper); then a target on one node affects all of them. Without replicated storage, each node must be configured as its own target; Ordivus currently does not report diverging nodes as cluster drift. Databases are likewise only created on the connected node (or via the `Replicated` database engine).
 
-## Grenzen
+## Limitations
 
-- Keine Sperre während `apply` (ClickHouse hat keine Advisory Locks); parallele `apply`-Läufe gegen dasselbe Target vermeiden.
-- Nicht modelliert: Settings-Profile, Quotas, Row Policies, Rolle-an-Rolle-Grants, `GRANT OPTION`, Spalten-Grants, Quellobjekte von `READ`/`WRITE`, Authentifizierung außer `sha256_password` (LDAP, Kerberos, Zertifikate).
-- `Database.engine` ohne Parameter; Engine-Wechsel wird nie ausgeführt.
+- No lock during `apply` (ClickHouse has no advisory locks); avoid parallel `apply` runs against the same target.
+- Not modeled: settings profiles, quotas, row policies, role-to-role grants, `GRANT OPTION`, column grants, source objects of `READ`/`WRITE`, authentication other than `sha256_password` (LDAP, Kerberos, certificates).
+- `Database.engine` without parameters; an engine change is never executed.

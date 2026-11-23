@@ -1,26 +1,26 @@
-# Sicherheit
+# Security
 
-## Sicherheitslücken melden
+## Reporting vulnerabilities
 
-Bitte melden Sie Sicherheitslücken **nicht** als öffentliches Issue, sondern vertraulich über [GitHub Security Advisories](https://github.com/Xaner98/Ordivus/security/advisories/new). Beschreiben Sie betroffene Version, Konfiguration und einen Weg, das Problem nachzuvollziehen. Sie erhalten eine Rückmeldung, sobald die Meldung gesichtet ist.
+Please do **not** report vulnerabilities as a public issue; report them confidentially via [GitHub Security Advisories](https://github.com/Xaner98/Ordivus/security/advisories/new). Describe the affected version, the configuration and a way to reproduce the problem. You will receive a response as soon as the report has been reviewed.
 
-## Unterstützte Versionen
+## Supported versions
 
-Ordivus ist Alpha-Software (`0.x`). Sicherheitskorrekturen erscheinen nur für die jeweils neueste Version.
+Ordivus is alpha software (`0.x`). Security fixes are released only for the latest version.
 
-## Sicherheitsmodell in Kürze
+## Security model in brief
 
-Ordivus arbeitet mit administrativen Zugangsdaten. Diese Grenzen setzt es selbst durch:
+Ordivus works with administrative credentials. It enforces these boundaries itself:
 
-- `plan` und `drift` verändern weder Zielsysteme noch Secret Stores. Zusätzlich empfohlen: eine Identität, die am Zielsystem nur lesen darf.
-- Nicht deklarierte Objekte werden nur gemeldet. Löschen setzt einen positiv abgegrenzten Scope, vollständige Discovery und die Operator Policy `allowDelete: true` voraus.
-- Die Konfiguration kann keine Rechte über die Operator Policy hinaus verschaffen: hochprivilegierte Rollen, Grants und ACL-Regeln (z. B. Superuser-Mitgliedschaften, `GRANT OPTION`, Admin-Kommandos) werden blockiert, solange die Operator Policy nicht `allowPrivilegedGrants: true` setzt. Systemobjekte, der eigene Admin-Login und dessen Rollen sind immer geschützt.
-- Unbekannte Zustände (fehlende Rechte, Timeouts, Teilinventare) führen nie zu Löschen, Anlegen oder Passwortänderungen.
-- Secrets erscheinen nicht in Reports, Logs oder Fehlermeldungen; HTTP-Clients folgen keinen Redirects und senden Tokens nur an den konfigurierten Endpunkt (bzw. über einen per `HTTP(S)_PROXY` gesetzten Proxy; das meldet Ordivus als Warnung, siehe [docs/konfiguration.md](docs/konfiguration.md#proxy)).
+- `plan` and `drift` change neither target systems nor secret stores. Additionally recommended: an identity that has read-only access to the target system.
+- Undeclared objects are only reported. Deleting requires a positively bounded scope, complete discovery and the operator policy `allowDelete: true`.
+- The configuration cannot grant privileges beyond the operator policy: highly privileged roles, grants and ACL rules (e.g. superuser memberships, `GRANT OPTION`, admin commands) are blocked as long as the operator policy does not set `allowPrivilegedGrants: true`. System objects, Ordivus's own admin login and its roles are always protected.
+- Unknown states (missing permissions, timeouts, partial inventories) never lead to deleting, creating or password changes.
+- Secrets do not appear in reports, logs or error messages; HTTP clients follow no redirects and send tokens only to the configured endpoint (or via a proxy set through `HTTP(S)_PROXY`; Ordivus reports this as a warning, see [docs/configuration.md](docs/configuration.md#proxy)).
 
-Außerhalb von Ordivus liegt die Verantwortung für:
+Outside of Ordivus, the responsibility lies with you for:
 
-- **Review der Konfiguration.** Wer die Konfiguration ändern darf, bestimmt, welche Objekte im erlaubten Rahmen angelegt werden – inklusive der Endpunkte, an die Zugangsdaten gesendet werden. Nutzen Sie TLS mit CA-Prüfung (`verify-full`) und `requireTls: true` in der Operator Policy.
-- **Schutz der Operator Policy und der Zugangsdaten.** Beides gehört in getrennt verwaltete, schreibgeschützte Quellen.
-- **Wer Jobs starten darf.** In Kubernetes ist jeder, der im Namespace der Apply-Vorlage Jobs oder Pods erzeugen kann, Teil der Vertrauensgrenze. Siehe [docs/kubernetes.md](docs/kubernetes.md) zu getrennten Namespaces und der optionalen Admission Policy.
-- **Adapter-Plugins.** Plugins sind ausführbarer Python-Code und keine Sandbox. Installieren Sie nur vertrauenswürdige Pakete.
+- **Reviewing the configuration.** Whoever may change the configuration determines which objects are created within the permitted bounds – including the endpoints credentials are sent to. Use TLS with CA verification (`verify-full`) and `requireTls: true` in the operator policy.
+- **Protecting the operator policy and the credentials.** Both belong in separately managed, read-only sources.
+- **Who may start jobs.** In Kubernetes, anyone who can create jobs or pods in the namespace of the apply template is part of the trust boundary. See [docs/kubernetes.md](docs/kubernetes.md) on separate namespaces and the optional admission policy.
+- **Adapter plugins.** Plugins are executable Python code and not a sandbox. Install only trusted packages.

@@ -1,10 +1,10 @@
-# MySQL-Adapter
+# MySQL adapter
 
-Verwaltet Datenbanken, Rollen, Benutzer und Grants in **MySQL 8** (getestet mit MySQL 8.4).
-Installation: `pip install 'ordivus[mysql]'` (PyMySQL ≥ 1.1). Vollständiges Beispiel: `examples/mysql/`.
+Manages databases, roles, users and grants in **MySQL 8** (tested with MySQL 8.4).
+Installation: `pip install 'ordivus[mysql]'` (PyMySQL ≥ 1.1). Complete example: `examples/mysql/`.
 
-Kinds in Ausführungsreihenfolge: `Database`, `DatabaseRole`, `DatabaseUser`, `Grant`
-(Löschungen in umgekehrter Reihenfolge).
+Kinds in execution order: `Database`, `DatabaseRole`, `DatabaseUser`, `Grant`
+(deletions in reverse order).
 
 ## Target
 
@@ -18,40 +18,40 @@ spec:
   endpoint:
     host: mysql.shop.svc.cluster.local
     port: 3306                 # Default 3306
-    user: ordivus_admin        # Konto, als das Ordivus sich anmeldet
+    user: ordivus_admin        # Account Ordivus logs in as
     tls:
-      mode: verify-full        # disable | require | verify-ca | verify-full (Default)
-      caFile: /trust/ca.pem    # ohne caFile gelten die System-CAs
+      mode: verify-full        # disable | require | verify-ca | verify-full (default)
+      caFile: /trust/ca.pem    # without caFile, the system CAs apply
   authentication:
-    credentialRef: mysql-admin # Passwort von endpoint.user
-  scope:                       # optional; ohne Eintrag wird alles inventarisiert
+    credentialRef: mysql-admin # Password of endpoint.user
+  scope:                       # optional; without an entry, everything is inventoried
     databases: {include: ["shop", "shop_*"]}
     users:     {include: ["shop_*"]}
     roles:     {include: ["shop_*"]}
 ```
 
-| TLS-Modus | Verhalten |
+| TLS mode | Behavior |
 |---|---|
-| `disable` | kein TLS. Nur für lokale Tests. Ohne TLS scheitert außerdem die Passwortprüfung bei `caching_sha2_password` meist (Ergebnis `unknown`) |
-| `require` | TLS, Zertifikat wird **nicht** geprüft |
-| `verify-ca` | Zertifikat gegen `caFile` geprüft, Hostname nicht: jedes Zertifikat derselben CA wird akzeptiert |
-| `verify-full` | Zertifikat und Hostname geprüft (Default, empfohlen) |
+| `disable` | no TLS. For local tests only. Without TLS, password verification with `caching_sha2_password` also usually fails (result `unknown`) |
+| `require` | TLS, certificate is **not** verified |
+| `verify-ca` | Certificate verified against `caFile`, hostname not: any certificate from the same CA is accepted |
+| `verify-full` | Certificate and hostname verified (default, recommended) |
 
-Alles außer `verify-full` gilt als unsichere Verbindung, auch `verify-ca`: Warnung und `insecureTransport: true` im Report, mit
-Operator Policy `requireTls: true` Abbruch vor dem Verbinden (Exit-Code 11).
+Everything except `verify-full` counts as an insecure connection, including `verify-ca`: warning and `insecureTransport: true` in the report, with
+operator policy `requireTls: true` abort before connecting (exit code 11).
 
-## Discovery und Scope
+## Discovery and scope
 
-- `spec.scope` begrenzt die Inventarisierung. Die Globs (`fnmatch`, Groß-/Kleinschreibung beachtet) gelten für den
-  Datenbanknamen bzw. den **Benutzernamen ohne Host**. Objekte außerhalb des Scopes sieht Ordivus nicht, sie werden
-  also auch nie gelöscht.
-- Ein Grant liegt im Scope, wenn sein Grantee im Scope `users` oder `roles` liegt und (bei Datenbank-/Tabellen-Grants)
-  seine Datenbank im Scope `databases`.
-- Der Authority-Scope für den `authoritative`-Modus kommt zusätzlich aus der `ReconciliationPolicy`
-  (`scope.DatabaseUser.glob` usw.). Die Globs dort gelten für die Ressourcen-ID, also `name@host` bei Konten und
-  `name@host ON <objekt>` bei Grants.
-- Die Datenbankliste ist nur `complete`, wenn `endpoint.user` das Privileg `SHOW DATABASES` **direkt** besitzt
-  (nicht über eine Rolle). Sonst meldet Ordivus `partial`: Es legt dann keine Datenbank an und löscht keine.
+- `spec.scope` limits the inventory. The globs (`fnmatch`, case-sensitive) apply to the
+  database name or the **user name without host**. Ordivus does not see objects outside the scope, so they
+  are never deleted either.
+- A grant is in scope if its grantee is in the `users` or `roles` scope and (for database/table grants)
+  its database is in the `databases` scope.
+- The authority scope for `authoritative` mode additionally comes from the `ReconciliationPolicy`
+  (`scope.DatabaseUser.glob` etc.). The globs there apply to the resource ID, i.e. `name@host` for accounts and
+  `name@host ON <object>` for grants.
+- The database list is only `complete` if `endpoint.user` holds the `SHOW DATABASES` privilege **directly**
+  (not via a role). Otherwise Ordivus reports `partial`: it then creates no databases and deletes none.
 
 ## Kind `Database`
 
@@ -61,13 +61,13 @@ metadata:
   name: shop
 spec:
   targetRef: shop-mysql
-  name: shop                    # optional, Default metadata.name (max. 64 Zeichen)
+  name: shop                    # optional, default metadata.name (max. 64 characters)
   characterSet: utf8mb4         # optional
   collation: utf8mb4_0900_ai_ci # optional
 ```
 
-Ressourcen-ID: der Datenbankname. Wenn du nur `characterSet` angibst, setzt MySQL bei einer Änderung dessen
-Default-Collation. Felder, die du weglässt, verwaltet Ordivus nicht.
+Resource ID: the database name. If you only specify `characterSet`, MySQL sets its
+default collation on a change. Ordivus does not manage fields you omit.
 
 ## Kind `DatabaseRole`
 
@@ -82,7 +82,7 @@ spec:
     host: "%"            # Default "%"
 ```
 
-Ressourcen-ID: `shop_reader@%`. Eine Rolle hat keine weiteren Felder. Ihre Rechte vergibst du mit `Grant`.
+Resource ID: `shop_reader@%`. A role has no further fields. You grant its permissions with `Grant`.
 
 ## Kind `DatabaseUser`
 
@@ -93,38 +93,38 @@ metadata:
 spec:
   targetRef: shop-mysql
   identity:
-    username: shop_app        # max. 32 Zeichen
-    host: "10.20.%"           # Default "%"; wird kleingeschrieben
-  roles: [shop_reader]        # gewährte Rollen; "name" = name@%, sonst "name@host"
-  defaultRoles: [shop_reader] # Teilmenge von roles; [] = SET DEFAULT ROLE NONE
+    username: shop_app        # max. 32 characters
+    host: "10.20.%"           # Default "%"; lowercased
+  roles: [shop_reader]        # granted roles; "name" = name@%, otherwise "name@host"
+  defaultRoles: [shop_reader] # subset of roles; [] = SET DEFAULT ROLE NONE
   accountLocked: false
   credentials:
     credentialRef: shop-app-password
-    passwordPolicy: verify    # verify (Default) | enforce | set-on-create
+    passwordPolicy: verify    # verify (default) | enforce | set-on-create
 ```
 
-Ressourcen-ID: `shop_app@10.20.%`. Bei Kontonamen trennt das **letzte** `@` Name und Host, damit funktionieren auch
-E-Mail-Adressen als Benutzernamen (`me@example.com@%`).
+Resource ID: `shop_app@10.20.%`. In account names, the **last** `@` separates name and host, so
+email addresses also work as user names (`me@example.com@%`).
 
-- `roles` wird exakt abgeglichen: fehlende Rollen werden gewährt, nicht deklarierte entzogen.
-- Rollen in `roles`/`defaultRoles` werden in der Planung geprüft (siehe [Privilegierte Rechte](#privilegierte-rechte-allowprivilegedgrants)):
-  Systemkonten (`root` usw.) und das eigene Login sind als Rolle immer gesperrt (`BLOCKED`).
-- Ein Benutzer ohne `credentials` muss `accountLocked: true` setzen. MySQL würde ihn sonst ohne Passwort anlegen,
-  und dann könnte sich jeder ohne Passwort anmelden. Ordivus lehnt das beim Anlegen ab.
-- `passwordPolicy: verify` meldet sich **wirklich** als der Benutzer an (siehe [Passwortprüfung](#passwortprüfung-verify)).
-  Fehler 1045 (Zugriff verweigert) bedeutet nur dann „Passwort falsch“ (→ `SET_PASSWORD`), wenn das Konto den Host
-  `%` hat und es keinen weiteren Eintrag mit demselben Namen und kein anonymes Konto gibt (sonst meldet Ordivus
-  sich gar nicht erst an). Alles andere ergibt
-  `unknown` („password unverifiable“; in `apply` Status `incomplete`, Exit 13).
+- `roles` is reconciled exactly: missing roles are granted, undeclared ones revoked.
+- Roles in `roles`/`defaultRoles` are checked during planning (see [Privileged permissions](#privileged-permissions-allowprivilegedgrants)):
+  system accounts (`root` etc.) and Ordivus's own login are always blocked as roles (`BLOCKED`).
+- A user without `credentials` must set `accountLocked: true`. Otherwise MySQL would create it without a password,
+  and then anyone could log in without a password. Ordivus rejects this on creation.
+- `passwordPolicy: verify` **actually** logs in as the user (see [Password verification](#password-verification-verify)).
+  Error 1045 (access denied) only means "wrong password" (→ `SET_PASSWORD`) if the account has host
+  `%` and there is no other entry with the same name and no anonymous account (otherwise Ordivus
+  does not attempt the login at all). Everything else results in
+  `unknown` ("password unverifiable"; in `apply` status `incomplete`, exit 13).
 
-### User oder Rolle?
+### User or role?
 
-In MySQL sind Rollen ebenfalls Konten in `mysql.user`. Ordivus behandelt ein Konto als **Rolle**, wenn es gesperrt
-ist (`account_locked = 'Y'`), das Passwort als abgelaufen gilt (`password_expired = 'Y'`) und
-`authentication_string` leer ist. Genau so legt `CREATE ROLE` ein Konto an. Alle anderen Konten sind Benutzer. Wenn
-du ein Konto (`name@host`) gleichzeitig als `DatabaseRole` und als `DatabaseUser` deklarierst, ist das ein
-Konfigurationsfehler (Exit-Code 12), schon bei `config validate`. Ist ein `DatabaseUser` in `roles` eines anderen
-Benutzers eingetragen, legt Ordivus ihn zuerst an.
+In MySQL, roles are also accounts in `mysql.user`. Ordivus treats an account as a **role** if it is locked
+(`account_locked = 'Y'`), its password is marked expired (`password_expired = 'Y'`) and
+`authentication_string` is empty. This is exactly how `CREATE ROLE` creates an account. All other accounts are users. If
+you declare an account (`name@host`) as both `DatabaseRole` and `DatabaseUser`, that is a
+configuration error (exit code 12), already during `config validate`. If a `DatabaseUser` is listed in another
+user's `roles`, Ordivus creates it first.
 
 ## Kind `Grant`
 
@@ -134,69 +134,69 @@ metadata:
   name: shop-reader-select
 spec:
   targetRef: shop-mysql
-  grantee: shop_reader         # "name" = name@%, oder "name@host"
+  grantee: shop_reader         # "name" = name@%, or "name@host"
   on: database                 # global | database | table
-  database: shop               # Pflicht bei database und table
-  table: orders                # nur bei table
+  database: shop               # Required for database and table
+  table: orders                # table only
   privileges: [SELECT, SHOW VIEW]
 ```
 
-Ressourcen-ID: ``shop_reader@% ON `shop`.*``. Bei `global` heißt das Objekt `*.*`, bei `table` `` `db`.`tabelle` ``.
+Resource ID: ``shop_reader@% ON `shop`.*``. For `global` the object is `*.*`, for `table` `` `db`.`table` ``.
 
-- Ordivus normalisiert Privilegnamen: Großschreibung, einfache Leerzeichen, sortiert, ohne Duplikate.
-  Die Liste wird **exakt** abgeglichen, nicht deklarierte Privilegien auf derselben Ebene werden entzogen.
-- `GRANT OPTION` kannst du wie ein normales Privileg in die Liste schreiben (privilegiert, siehe unten).
-- Grants auf die Systemdatenbanken `mysql`, `sys`, `information_schema` und `performance_schema` werden immer
-  abgelehnt (Konfigurationsfehler): Schreibrechte auf `mysql.*` entsprechen `root`.
-- Datenbanken außerhalb von `spec.scope.databases` sind gesperrt (`BLOCKED`); `apply` prüft das ein zweites Mal.
-- `ALL`, `ALL PRIVILEGES` und `USAGE` werden abgelehnt. MySQL speichert `ALL PRIVILEGES` als Einzelprivilegien, je
-  nach Server-Version und Plugins als andere Menge. Ein deklariertes `ALL` würde deshalb dauerhaft als Drift
-  erscheinen. Liste die Privilegien explizit auf.
-- Globale Grants enthalten auch dynamische Privilegien (`mysql.global_grants`, z. B. `BACKUP_ADMIN`).
-- Tabellen-Grants setzen voraus, dass die Tabelle existiert.
-- Datenbanknamen in Grants auf Datenbankebene sind in MySQL Muster (`_` und `%` sind Wildcards). Ordivus escapt
-  sie (`app\_db`), ein Grant auf `app_db` gilt also nur für `app_db`, nicht für `appXdb`. Beim Lesen werden die
-  Escapes entfernt. Vorhandene, nicht escapte Wildcard-Grants erscheinen als eigenes Objekt mit der Endung
-  `(wildcard pattern)` und `manageable: false`; sie werden nie geändert oder gelöscht.
+- Ordivus normalizes privilege names: uppercase, single spaces, sorted, without duplicates.
+  The list is reconciled **exactly**; undeclared privileges on the same level are revoked.
+- You can write `GRANT OPTION` into the list like a normal privilege (privileged, see below).
+- Grants on the system databases `mysql`, `sys`, `information_schema` and `performance_schema` are always
+  rejected (configuration error): write permissions on `mysql.*` are equivalent to `root`.
+- Databases outside `spec.scope.databases` are blocked (`BLOCKED`); `apply` checks this a second time.
+- `ALL`, `ALL PRIVILEGES` and `USAGE` are rejected. MySQL stores `ALL PRIVILEGES` as individual privileges,
+  as a different set depending on server version and plugins. A declared `ALL` would therefore permanently show up as drift.
+  List the privileges explicitly.
+- Global grants also include dynamic privileges (`mysql.global_grants`, e.g. `BACKUP_ADMIN`).
+- Table grants require the table to exist.
+- Database names in database-level grants are patterns in MySQL (`_` and `%` are wildcards). Ordivus escapes
+  them (`app\_db`), so a grant on `app_db` applies only to `app_db`, not to `appXdb`. The escapes are
+  removed when reading. Existing, unescaped wildcard grants appear as separate objects with the suffix
+  `(wildcard pattern)` and `manageable: false`; they are never changed or deleted.
 
-## Privilegierte Rechte (`allowPrivilegedGrants`)
+## Privileged permissions (`allowPrivilegedGrants`)
 
-Ohne die Operator-Policy `allowPrivilegedGrants: true` (Default `false`, siehe `docs/konfiguration.md`) sperrt
-Ordivus in der Planung (`BLOCKED`, in `apply` Exit 11):
+Without the operator policy `allowPrivilegedGrants: true` (default `false`, see `docs/configuration.md`),
+Ordivus blocks during planning (`BLOCKED`, exit 11 in `apply`):
 
-- jeden Grant mit `on: global` (`*.*`),
-- die Privilegien `SUPER`, `CREATE USER`, `SYSTEM_USER`, `FILE`, `PROXY`, `SHUTDOWN`, `PROCESS`, `RELOAD`,
+- every grant with `on: global` (`*.*`),
+- the privileges `SUPER`, `CREATE USER`, `SYSTEM_USER`, `FILE`, `PROXY`, `SHUTDOWN`, `PROCESS`, `RELOAD`,
   `GRANT OPTION`, `CREATE ROLE`, `DROP ROLE`, `REPLICATION SLAVE`, `REPLICATION CLIENT`, `CREATE TABLESPACE`,
-  `SHOW DATABASES` und alle `*_ADMIN` (z. B. `ROLE_ADMIN`, `BACKUP_ADMIN`) auf jeder Ebene,
-- als Rolle (`roles`/`defaultRoles`) ein **Benutzerkonto** statt einer Rolle,
-- als Rolle eine Rolle, die selbst oder über weitere Rollen globale Rechte, Rechte auf einer Systemdatenbank (auch
-  auf einzelnen Tabellen, Spalten oder Routinen dort, z. B. `GRANT UPDATE ON mysql.user`, und über Wildcard-Muster
-  wie `` `m%`.* ``) oder ein `PROXY`-Recht (`mysql.proxies_priv`, z. B. `GRANT PROXY ON root@'%'`) hat.
+  `SHOW DATABASES` and all `*_ADMIN` (e.g. `ROLE_ADMIN`, `BACKUP_ADMIN`) on any level,
+- a **user account** instead of a role used as a role (`roles`/`defaultRoles`),
+- a role used as a role that, itself or through further roles, has global permissions, permissions on a system database (also
+  on individual tables, columns or routines there, e.g. `GRANT UPDATE ON mysql.user`, and via wildcard patterns
+  such as `` `m%`.* ``) or a `PROXY` permission (`mysql.proxies_priv`, e.g. `GRANT PROXY ON root@'%'`).
 
-MySQL vergleicht Kontonamen mit aufgefülltem Leerraum (`'root '` ist `root`) und Hosts ohne Groß-/Kleinschreibung.
-Deshalb sind Leerzeichen am Anfang oder Ende von Benutzernamen, Hosts, Rollen- und Grantee-Angaben sowie Datenbank-
-und Tabellennamen ein Konfigurationsfehler. Zusätzlich löst die Planung jede Kontoangabe über `mysql.user` mit
-MySQLs eigenem Vergleich auf und prüft die tatsächlich getroffene Zeile, nicht den Text.
+MySQL compares account names with padded whitespace (`'root '` is `root`) and hosts case-insensitively.
+Therefore leading or trailing spaces in user names, hosts, role and grantee specifications, and database
+and table names are a configuration error. In addition, planning resolves every account specification via `mysql.user` using
+MySQL's own comparison and checks the row actually matched, not the text.
 
-Immer gesperrt, auch mit `allowPrivilegedGrants: true`: Systemkonten und das eigene Login als Rolle, als Grantee
-oder als deklariertes Konto. Eine Rolle, die es noch nicht gibt, ist erlaubt: Sie entsteht über eine deklarierte
-`DatabaseRole` (ohne Rechte) vor der Zuweisung.
+Always blocked, even with `allowPrivilegedGrants: true`: system accounts and Ordivus's own login as a role, as a grantee
+or as a declared account. A role that does not exist yet is allowed: it is created from a declared
+`DatabaseRole` (without permissions) before the assignment.
 
-## Geschützte Systemobjekte
+## Protected system objects
 
-Diese Objekte sind `system`. Ordivus ändert und löscht sie nie, und sie erscheinen nicht als unmanaged:
+These objects are `system`. Ordivus never changes or deletes them, and they do not appear as unmanaged:
 
-- Konten: `root` (auf **jedem** Host, also auch `root@%`), `mysql.sys`, `mysql.session`, `mysql.infoschema` und
-  ihre Grants.
-- Datenbanken: `mysql`, `sys`, `information_schema`, `performance_schema`.
+- Accounts: `root` (on **every** host, so also `root@%`), `mysql.sys`, `mysql.session`, `mysql.infoschema` and
+  their grants.
+- Databases: `mysql`, `sys`, `information_schema`, `performance_schema`.
 
-Das eigene Konto (`endpoint.user`) und seine Grants gelten als nicht verwaltbar: Ordivus löscht sie nie und ändert
-sie nicht. Rollen, die das eigene Konto (auch über weitere Rollen) hält, und ihre Grants sind `system`: Ordivus
-entzieht oder löscht sie nie, damit es sich nicht selbst aussperrt.
+Ordivus's own account (`endpoint.user`) and its grants count as not manageable: Ordivus never deletes or changes
+them. Roles held by Ordivus's own account (including via further roles) and their grants are `system`: Ordivus
+never revokes or deletes them, so it does not lock itself out.
 
-## Rechte der Ordivus-Identität
+## Permissions of the Ordivus identity
 
-**plan/drift (Read-only-Identität, empfohlen):**
+**plan/drift (read-only identity, recommended):**
 
 ```sql
 CREATE USER 'ordivus_ro'@'%' IDENTIFIED BY '...';
@@ -204,57 +204,57 @@ GRANT SELECT ON mysql.* TO 'ordivus_ro'@'%';
 GRANT SHOW DATABASES ON *.* TO 'ordivus_ro'@'%';
 ```
 
-Für `passwordPolicy: verify` muss Ordivus sich außerdem als der verwaltete Benutzer anmelden können, also über den
-Netzpfad und einen passenden Host-Eintrag.
+For `passwordPolicy: verify`, Ordivus must also be able to log in as the managed user, i.e. via the
+network path and a matching host entry.
 
-**apply:** zusätzlich `CREATE USER`, `CREATE ROLE`, `DROP ROLE`, `CREATE`, `ALTER`, `DROP` (Datenbanken), jedes
-Privileg, das du vergeben willst, jeweils `WITH GRANT OPTION`, außerdem `ROLE_ADMIN` für Rollenzuweisungen.
-`SYSTEM_USER` brauchst du nur, wenn Ordivus Konten mit `SYSTEM_USER` verändern soll.
+**apply:** additionally `CREATE USER`, `CREATE ROLE`, `DROP ROLE`, `CREATE`, `ALTER`, `DROP` (databases), every
+privilege you want to grant, each `WITH GRANT OPTION`, and `ROLE_ADMIN` for role assignments.
+You only need `SYSTEM_USER` if Ordivus is to modify accounts with `SYSTEM_USER`.
 
-### Read-only-Schutz
+### Read-only protection
 
-Read-only-Sessions (`plan`, `drift`) sind doppelt abgesichert:
+Read-only sessions (`plan`, `drift`) are protected twice:
 
-1. Der Adapter verweigert in einer Read-only-Session jede Operation, bevor er SQL sendet.
-2. Die Session läuft mit `SET SESSION TRANSACTION READ ONLY`. MySQL 8.4 weist damit auch `CREATE USER`, `GRANT`
-   und `CREATE DATABASE` ab (Fehler 1792).
+1. The adapter refuses every operation in a read-only session before it sends SQL.
+2. The session runs with `SET SESSION TRANSACTION READ ONLY`. MySQL 8.4 then also rejects `CREATE USER`, `GRANT`
+   and `CREATE DATABASE` (error 1792).
 
-Eine Sicherheitsgrenze ist beides nicht, denn eine Session kann den Modus selbst zurücksetzen. Echten Schutz bietet
-nur eine Read-only-Identität mit den Rechten oben.
+Neither is a security boundary, because a session can reset the mode itself. Only a read-only identity
+with the permissions above offers real protection.
 
-## Passwortprüfung (`verify`)
+## Password verification (`verify`)
 
-`verify` prüft das Passwort mit einem echten Login-Versuch. Ein falsches Passwort ist ein fehlgeschlagener Login am
-Server. Damit `plan`/`drift` kein Konto sperren, meldet Ordivus sich **nicht** an (Ergebnis `unknown`), wenn
+`verify` checks the password with a real login attempt. A wrong password is a failed login on the
+server. So that `plan`/`drift` do not lock an account, Ordivus does **not** log in (result `unknown`) if
 
-- irgendein Eintrag mit diesem Benutzernamen (auf jedem Host) oder ein anonymes Konto `FAILED_LOGIN_ATTEMPTS`
-  gesetzt hat (`mysql.user.User_attributes` → `Password_locking`): der Login könnte diesen Eintrag treffen,
-- es neben dem Konto weitere Einträge mit demselben Namen oder anonyme Konten gibt oder
-- das Plugin oder die Komponente `connection_control` aktiv ist (verzögert Logins nach Fehlversuchen).
+- any entry with this user name (on any host) or an anonymous account has `FAILED_LOGIN_ATTEMPTS`
+  set (`mysql.user.User_attributes` → `Password_locking`): the login could hit that entry,
+- there are further entries with the same name or anonymous accounts besides the account, or
+- the `connection_control` plugin or component is active (delays logins after failed attempts).
 
-Fehlt die Bibliothek `cryptography` (nötig für `caching_sha2_password` ohne TLS), ist das Ergebnis ebenfalls
-`unknown`. Gibt es Sperr-Richtlinien oder Login-Audits, die Fehlversuche melden, nimm `passwordPolicy: enforce`.
+If the `cryptography` library is missing (required for `caching_sha2_password` without TLS), the result is also
+`unknown`. If there are lockout policies or login audits that report failed attempts, use `passwordPolicy: enforce`.
 
-## Passwörter in Server-Logs
+## Passwords in server logs
 
-Ordivus sendet Passwörter als `IDENTIFIED BY '...'` (MySQL hasht serverseitig). MySQL 8 schreibt solche Statements
-ins General Log und in `performance_schema` umgeschrieben (`IDENTIFIED BY <secret>`; mit MySQL 8.4 getestet). Der
-Klartext erreicht aber den Server-Prozess und kann über Statements, die MySQL nicht umschreiben kann, oder
-Debug-/Audit-Plugins anderer Hersteller sichtbar werden. Lass `general_log` aus und prüfe Audit-Plugins, bevor
-Ordivus Passwörter setzt.
+Ordivus sends passwords as `IDENTIFIED BY '...'` (MySQL hashes server-side). MySQL 8 writes such statements
+to the general log and to `performance_schema` in rewritten form (`IDENTIFIED BY <secret>`; tested with MySQL 8.4). The
+plaintext does, however, reach the server process and can become visible through statements MySQL cannot rewrite, or
+through third-party debug/audit plugins. Keep `general_log` off and review audit plugins before
+Ordivus sets passwords.
 
 ## Locking
 
-`apply` holt `GET_LOCK('ordivus', 10)` auf dem Server. Ist der Lock nach 10 Sekunden nicht frei, bricht der Lauf mit
-einem temporären Fehler ab (Exit 13). Der Lock gilt serverweit für alle Ordivus-Läufe.
+`apply` acquires `GET_LOCK('ordivus', 10)` on the server. If the lock is not free after 10 seconds, the run aborts with
+a transient error (exit 13). The lock applies server-wide to all Ordivus runs.
 
-## Grenzen
+## Limitations
 
-- Nicht unterstützt: Spaltenrechte (`mysql.columns_priv`), Routinen-/Proxy-Rechte, `WITH GRANT OPTION` für dynamische
-  Privilegien, Rollen-Hierarchien (Rollen an Rollen), Ressourcenlimits, Passwort-Ablauf, Auth-Plugins außer dem
-  Server-Default, `partial_revokes`.
-- `SHOW DATABASES` über eine Rolle wird nicht erkannt, das Datenbankinventar ist dann `partial`.
-- `passwordPolicy: verify` erzeugt pro abweichendem Benutzer und Lauf einen fehlgeschlagenen Login (außer bei den
-  oben genannten Sperr-Mechanismen). Bei mehreren Host-Einträgen für denselben Namen ist das Ergebnis `unknown`.
-- `enforce` scheitert bei aktivem `password_history`, wenn das Passwort gleich bleibt.
-- Groß-/Kleinschreibung von Datenbanknamen hängt von `lower_case_table_names` ab. Ordivus vergleicht exakt.
+- Not supported: column permissions (`mysql.columns_priv`), routine/proxy permissions, `WITH GRANT OPTION` for dynamic
+  privileges, role hierarchies (roles granted to roles), resource limits, password expiry, auth plugins other than the
+  server default, `partial_revokes`.
+- `SHOW DATABASES` via a role is not detected; the database inventory is then `partial`.
+- `passwordPolicy: verify` produces one failed login per mismatching user and run (except with the
+  lockout mechanisms mentioned above). With several host entries for the same name, the result is `unknown`.
+- `enforce` fails with active `password_history` if the password stays the same.
+- Case sensitivity of database names depends on `lower_case_table_names`. Ordivus compares exactly.
