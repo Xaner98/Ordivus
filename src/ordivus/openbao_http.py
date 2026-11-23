@@ -7,12 +7,14 @@ URL oder Meldung.
 
 import json
 import ssl
+import time
 import urllib.error
 import urllib.request
 
 from ordivus.adapters.base import AuthorizationError, PermanentError, TransientError
 
 TIMEOUT = 10
+RETRIES = 3
 
 
 def tls_context(tls: dict | None) -> ssl.SSLContext:
@@ -28,13 +30,18 @@ def request(url: str, method: str, path: str, token: str | None = None, body: di
         headers["X-Vault-Namespace"] = namespace
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"{url.rstrip('/')}/v1/{path}", data, headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
-            status, raw = resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        status, raw = e.code, e.read()
-    except (OSError, ValueError) as e:  # URLError, Timeout, TLS-Fehler, ungültige URL
-        raise TransientError(f"openbao {method} {path}: {type(e).__name__}") from None
+    for attempt in range(RETRIES if method == "GET" else 1):  # nur lesende Anfragen sind gefahrlos wiederholbar
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
+                status, raw = resp.status, resp.read()
+            break
+        except urllib.error.HTTPError as e:
+            status, raw = e.code, e.read()
+            break
+        except (OSError, ValueError) as e:  # URLError, Timeout, TLS-Fehler, ungültige URL
+            if attempt == RETRIES - 1 or method != "GET" or isinstance(e, ValueError | ssl.SSLError):
+                raise TransientError(f"openbao {method} {path}: {type(e).__name__}") from None
+            time.sleep(0.2 * (attempt + 1))
     try:
         return status, json.loads(raw) if raw else {}
     except ValueError:

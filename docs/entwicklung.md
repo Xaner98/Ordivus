@@ -40,7 +40,7 @@ Die Integrationstests laufen gegen echte Zielsysteme in Docker und werden übers
 | Redis | `redis:8-alpine` | 16379 |
 | OpenBao | `openbao/openbao` (dev mode) | 18200 |
 
-Startbefehle und Zugangsdaten stehen jeweils am Anfang von `tests/integration/test_<adapter>.py`. Mit `ORDIVUS_TEST_HOST` legen Sie fest, unter welchem Hostnamen die Container erreichbar sind (Standard `localhost`; `scripts/dev.sh` setzt `host.docker.internal`).
+`scripts/test-containers.sh up` startet alle sechs Container mit den Test-Zugangsdaten, die die Tests erwarten; `scripts/test-containers.sh down` entfernt sie wieder. Mit `ORDIVUS_TEST_HOST` legen Sie fest, unter welchem Hostnamen die Container erreichbar sind (Standard `localhost`; `scripts/dev.sh` setzt die Gateway-Adresse des Docker-Bridge-Netzes).
 
 Kubernetes-E2E gegen einen lokalen Cluster (z. B. Docker Desktop):
 
