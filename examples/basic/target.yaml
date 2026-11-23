@@ -1,0 +1,20 @@
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: analytics-postgres
+spec:
+  adapter: postgresql
+  endpoint:
+    host: postgres.data-platform.svc.cluster.local
+    port: 5432
+    database: postgres
+    tls:
+      mode: verify-full
+      caFile: /trust/ca.pem
+  authentication:
+    credentialRef: postgres-admin
+  scope:
+    databases:
+      include: [analytics, reporting]
+    users:
+      include: ["analytics_*", "reporting_*"]
