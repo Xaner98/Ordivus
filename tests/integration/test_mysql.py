@@ -521,3 +521,15 @@ def test_verify_skips_when_another_host_row_has_login_locking(my):
     with a.connect(target, Secret(ROOT_PASSWORD), write=False) as session:
         assert a.verify_password(session, target, Resource("DatabaseUser", f"{p}two@%"), Secret("stale-pw-1")) is None
     assert can_login(f"{p}two", "right-password-4", host="127.0.0.1") or can_login(f"{p}two", "right-password-3")
+
+
+def test_server_version_and_minimum(my):
+    from ordivus.adapters.mysql import _product_version
+
+    with MySQLAdapter().connect({"endpoint": ENDPOINT}, Secret(ROOT_PASSWORD), write=False) as session:
+        assert MySQLAdapter().server_version(session).startswith("MySQL 8.")
+    assert _product_version("MySQL", "8.0.16-log", (8, 0, 16)) == "MySQL 8.0.16"
+    with pytest.raises(PermanentError, match=r"MySQL 8.0.15 is not supported \(minimum 8.0.16\)"):
+        _product_version("MySQL", "8.0.15", (8, 0, 16))
+    with pytest.raises(PermanentError, match="use adapter 'mariadb'"):
+        MySQLAdapter()._check_version("11.4.13-MariaDB-ubu2404")

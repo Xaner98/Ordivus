@@ -1,0 +1,78 @@
+# Grafana: one team with folder access, a read-only folder for everyone and a CI service account.
+# The admin service account token is stored as a file in /var/run/ordivus/secrets.
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: files
+spec:
+  type: file
+  directory: /var/run/ordivus/secrets
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: grafana-admin-token
+spec:
+  providerRef: files
+  path: grafana-admin-token
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: observability-grafana
+spec:
+  adapter: grafana
+  endpoint:
+    host: grafana.monitoring.svc.cluster.local
+    port: 3000
+    tls:
+      caFile: /trust/ca.pem
+  orgId: 1
+  authentication:
+    credentialRef: grafana-admin-token
+  scope:
+    teams:
+      include: ["platform-*"]
+    folders:
+      include: ["platform-*"]
+    serviceAccounts:
+      include: ["platform-*"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: observability-grafana-policy
+spec:
+  targetRef: observability-grafana
+  mode: additive
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: GrafanaTeam
+metadata:
+  name: platform-sre
+spec:
+  targetRef: observability-grafana
+  email: sre@example.com
+  members: [alice, bob]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: GrafanaFolder
+metadata:
+  name: platform-dashboards
+spec:
+  targetRef: observability-grafana
+  title: Platform
+  permissions:
+    - team: platform-sre
+      permission: Edit
+    - role: Viewer
+      permission: View
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: GrafanaServiceAccount
+metadata:
+  name: platform-ci
+spec:
+  targetRef: observability-grafana
+  role: Editor
+  isDisabled: false

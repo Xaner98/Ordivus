@@ -5,7 +5,6 @@ Rollen sind instanzweit, Grants liegen je Datenbank: die Grant-Discovery öffnet
 Datenbank im Scope und meldet ``partial``, sobald eine davon nicht lesbar ist.
 """
 
-import fnmatch
 import hashlib
 import json
 from collections import defaultdict
@@ -13,6 +12,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import Any
 
+from ordivus.adapters import common
 from ordivus.adapters.base import (
     COMPLETE,
     CREATE,
@@ -78,6 +78,7 @@ PRIVILEGED_QUERY = _chain("%s") + ("SELECT r.oid, r.rolname, r.rolsuper, r.rolcr
 # CREATE auf Schema/Datenbank: Objekte im search_path fremder Rollen (bzw. ein Schema "$user") kapern deren Aufrufe.
 PRIVILEGED_GRANTS = {"database": {"CREATE"}, "schema": {"CREATE"}, "tables-in-schema": {"TRIGGER", "MAINTAIN"}}
 RESERVED_SCHEMAS = ("pg_catalog", "information_schema")
+MIN_VERSION = 130000  # server_version_num; ältere Versionen sind ungetestet und ohne Herstellersupport
 
 
 @dataclass
@@ -86,6 +87,7 @@ class Session:
     target: dict
     secret: Secret | None
     write: bool
+    version: int  # server_version_num, z. B. 170002
 
 
 # --- Validierung --------------------------------------------------------------------------------
@@ -113,21 +115,13 @@ def _validate_target(spec: dict) -> list[str]:
     errors = _unknown(spec, {"endpoint", "scope"})
     if not isinstance(spec.get("endpoint"), dict):
         return [*errors, "spec.endpoint must be a mapping"]
-    ep, problems = _mapping(spec, "endpoint", {"host", "port", "database", "user", "tls"}, "spec")
-    errors += problems
-    if not isinstance(ep.get("host"), str) or not ep.get("host"):
-        errors.append("spec.endpoint.host must be a non-empty string")
+    ep = spec["endpoint"]
+    errors += common.validate_endpoint(ep, extra=("database", "user"), tls_fields=("mode", "caFile"))
     errors += _name(ep.get("user"), "spec.endpoint.user")
     errors += _name(ep.get("database", "postgres"), "spec.endpoint.database")
-    port = ep.get("port", 5432)
-    if type(port) is not int or not 0 < port < 65536:
-        errors.append("spec.endpoint.port must be an integer between 1 and 65535")
-    tls, problems = _mapping(ep, "tls", {"mode", "caFile"}, "spec.endpoint")
-    errors += problems
-    if tls.get("mode", "prefer") not in TLS_MODES:
+    tls = ep.get("tls", {})
+    if isinstance(tls, dict) and tls.get("mode", "prefer") not in TLS_MODES:
         errors.append(f"spec.endpoint.tls.mode must be one of {list(TLS_MODES)}")
-    if "caFile" in tls and (not isinstance(tls["caFile"], str) or not tls["caFile"]):
-        errors.append("spec.endpoint.tls.caFile must be a non-empty string")
     scope, problems = _mapping(spec, "scope", {"databases", "roles"}, "spec")
     errors += problems
     for key in ("databases", "roles"):
@@ -196,11 +190,6 @@ def _grant_id(attrs: dict) -> str:
     return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
 
 
-def _in_scope(scope: dict | None, key: str, name: str) -> bool:
-    include = ((scope or {}).get(key) or {}).get("include")
-    return include is None or any(fnmatch.fnmatchcase(name, g) for g in include)
-
-
 # --- Verbindung und Fehler ------------------------------------------------------------------------
 
 def _params(target: dict, secret: Secret | None, dbname: str | None = None, user: str | None = None,
@@ -261,6 +250,7 @@ def _open(params: dict):
 
 class PostgreSQLAdapter(Adapter):
     id = "postgresql"
+    api_version = 1
     # Rollen vor Datenbanken: CREATE DATABASE ... OWNER braucht die Rolle; Löschen läuft umgekehrt
     kinds = ("DatabaseRole", "DatabaseUser", "Database", "Grant")
     password_kinds = ("DatabaseUser",)
@@ -304,6 +294,8 @@ class PostgreSQLAdapter(Adapter):
     def check(self, session, resource, allow_privileged=False):
         policy = "requires operator policy allowPrivilegedGrants"
         if resource.kind == "Grant":
+            if "MAINTAIN" in resource.attrs["privileges"] and session.version < 170000:
+                return f"MAINTAIN requires PostgreSQL 17 or later (server is {self.server_version(session)})"
             found = sorted(PRIVILEGED_GRANTS[resource.attrs["on"]] & set(resource.attrs["privileges"]))
             if found and not allow_privileged:
                 return f"{', '.join(found)} on {resource.attrs['on']} is privileged; {policy}"
@@ -313,7 +305,7 @@ class PostgreSQLAdapter(Adapter):
         if resource.attrs.get("createrole") and not allow_privileged:
             return f"createrole is privileged; {policy}"
         for parent in resource.attrs.get("memberOf", []):
-            if not _in_scope(session.target.get("scope"), "roles", parent):  # auch mit Freigabe nie
+            if not common.in_scope(session.target.get("scope"), "roles", parent):  # auch mit Freigabe nie
                 return f"memberOf {parent!r} is outside spec.scope.roles"
             if parent.startswith("pg_") and not allow_privileged:
                 return f"memberOf {parent!r}: predefined pg_* roles are privileged; {policy}"
@@ -333,7 +325,14 @@ class PostgreSQLAdapter(Adapter):
     @contextmanager
     def connect(self, target, secret, write):
         with _open(_params(target, secret, read_only=not write)) as conn:
-            yield Session(conn, target, secret, write)
+            session = Session(conn, target, secret, write, conn.info.server_version)
+            if session.version < MIN_VERSION:
+                raise PermanentError(f"{self.server_version(session)} is not supported (minimum PostgreSQL 13)")
+            yield session
+
+    def server_version(self, session):
+        major, minor = divmod(session.version, 10000)  # ab PG 10: MMmmmm, davor MMmmpp (9.6.24 = 90624)
+        return f"PostgreSQL {major}.{minor}" if major >= 10 else f"PostgreSQL {major}.{minor // 100}.{minor % 100}"
 
     def _database(self, session: Session, dbname: str, write: bool = False):
         return _open(_params(session.target, session.secret, dbname=dbname, read_only=not write))
@@ -345,7 +344,7 @@ class PostgreSQLAdapter(Adapter):
                     "SELECT datname, pg_get_userbyid(datdba), pg_encoding_to_char(encoding) FROM pg_database")
                 return Discovery(COMPLETE, [
                     Resource(kind, n, {"owner": owner, "encoding": enc}, system=n in SYSTEM_DATABASES)
-                    for n, owner, enc in rows if _in_scope(scope, "databases", n)])
+                    for n, owner, enc in rows if common.in_scope(scope, "databases", n)])
             if kind in ROLE_KINDS:
                 return Discovery(COMPLETE, [
                     Resource(kind, n, {"memberOf": list(member_of), "connectionLimit": limit, "createdb": createdb,
@@ -354,10 +353,10 @@ class PostgreSQLAdapter(Adapter):
                              system=oid == BOOTSTRAP_OID or n.startswith("pg_") or admin_chain)
                     for oid, n, login, superuser, limit, createdb, createrole, member_of, me, admin_chain
                     in session.conn.execute(ROLES_QUERY)
-                    if login == (kind == "DatabaseUser") and _in_scope(scope, "roles", n)])
+                    if login == (kind == "DatabaseUser") and common.in_scope(scope, "roles", n)])
             databases = [n for (n,) in session.conn.execute(
                 "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY 1")
-                if _in_scope(scope, "databases", n)]
+                if common.in_scope(scope, "databases", n)]
         resources, failed = [], []
         for db in databases:
             try:
@@ -384,7 +383,7 @@ class PostgreSQLAdapter(Adapter):
     def _apply_grant(self, session: Session, op: Op, sql):
         attrs = (op.desired or op.observed).attrs
         db, on = attrs["database"], attrs["on"]
-        if not _in_scope(session.target.get("scope"), "databases", db):
+        if not common.in_scope(session.target.get("scope"), "databases", db):
             raise PermanentError(f"database {db!r} is outside the target scope")
         obj = sql.SQL({"database": "DATABASE {}", "schema": "SCHEMA {}", "tables-in-schema": "ALL TABLES IN SCHEMA {}"}
                       [on]).format(sql.Identifier(db if on == "database" else attrs["schema"]))
@@ -397,7 +396,8 @@ class PostgreSQLAdapter(Adapter):
 
         with self._database(session, db, write=True) as conn, _mapped(), conn.transaction():
             if op.action == DELETE:
-                conn.execute(sql.SQL("REVOKE ALL PRIVILEGES ON {} FROM {}").format(obj, grantee))
+                # nur die beobachteten Rechte: ALL PRIVILEGES träfe auch nicht verwaltete Einzeltabellen-Grants
+                conn.execute(sql.SQL("REVOKE {} ON {} FROM {}").format(privileges(attrs["privileges"]), obj, grantee))
                 return
             want = attrs["privileges"]
             known = [p for p in PRIVILEGES[on] if p != "MAINTAIN" or conn.info.server_version >= 170000]
@@ -444,12 +444,13 @@ def _grants(conn, db: str, scope: dict | None) -> list[Resource]:
             held[(schema, grantee)][privilege].add(oid)
     for (schema, grantee), by_privilege in held.items():
         owned = {oid for oid, owner in tables[schema].items() if owner == grantee}  # Eigentümer hat implizit alles
-        found[("tables-in-schema", schema, grantee)] = {
-            p for p, oids in by_privilege.items() if len(oids | owned) == len(tables[schema])}
+        complete = {p for p, oids in by_privilege.items() if len(oids | owned) == len(tables[schema])}
+        if complete:  # nur Einzeltabellen-Rechte: kein tables-in-schema-Grant (sonst UNMANAGED/DELETE-Rauschen)
+            found[("tables-in-schema", schema, grantee)] = complete
     resources = []
     for (on, schema, grantee), privileges in found.items():
         name = names.get(grantee)
-        if name is None or not _in_scope(scope, "roles", name):
+        if name is None or not common.in_scope(scope, "roles", name):
             continue
         attrs = {"grantee": name, "database": db, "on": on, **({"schema": schema} if schema else {}),
                  "privileges": sorted(privileges)}

@@ -1,0 +1,115 @@
+# Example: shop database with a read role, application user and grants on MariaDB 10.6+ (roles have no host; grantee without "@" is a role).
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: shop-mariadb
+spec:
+  adapter: mariadb
+  endpoint:
+    host: mariadb.shop.svc.cluster.local
+    port: 3306
+    user: ordivus_admin
+    tls:
+      mode: verify-full
+      caFile: /trust/ca.pem
+  authentication:
+    credentialRef: mariadb-admin
+  scope:
+    databases:
+      include: ["shop"]
+    users:
+      include: ["shop_*"]
+    roles:
+      include: ["shop_*"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: local-secrets
+spec:
+  type: file
+  directory: /var/run/secrets/ordivus
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: mariadb-admin
+spec:
+  providerRef: local-secrets
+  path: mariadb-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: shop-app-password
+spec:
+  providerRef: local-secrets
+  path: shop-app
+  lifecycle:
+    generator:
+      length: 40
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Database
+metadata:
+  name: shop
+spec:
+  targetRef: shop-mariadb
+  characterSet: utf8mb4
+  collation: utf8mb4_unicode_ci
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseRole
+metadata:
+  name: shop-reader
+spec:
+  targetRef: shop-mariadb
+  identity:
+    username: shop_reader
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: shop-app
+spec:
+  targetRef: shop-mariadb
+  identity:
+    username: shop_app
+    host: "10.20.%"
+  roles: [shop_reader]
+  defaultRoles: [shop_reader]
+  accountLocked: false
+  credentials:
+    credentialRef: shop-app-password
+    passwordPolicy: verify
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Grant
+metadata:
+  name: shop-reader-select
+spec:
+  targetRef: shop-mariadb
+  grantee: shop_reader
+  on: database
+  database: shop
+  privileges: [SELECT, SHOW VIEW]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Grant
+metadata:
+  name: shop-app-orders
+spec:
+  targetRef: shop-mariadb
+  grantee: shop_app@10.20.%
+  on: table
+  database: shop
+  table: orders
+  privileges: [INSERT, UPDATE]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: shop-governance
+spec:
+  targetRef: shop-mariadb
+  mode: additive

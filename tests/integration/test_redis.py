@@ -13,7 +13,7 @@ redis = pytest.importorskip("redis")
 
 from ordivus import adapters  # noqa: E402
 from ordivus.adapters.base import CREATE, Op, PermanentError, Secret  # noqa: E402
-from ordivus.adapters.redis import RedisAdapter  # noqa: E402
+from ordivus.adapters.redis import RedisAdapter, _getuser  # noqa: E402
 from ordivus.core import config, engine  # noqa: E402
 from ordivus.core.config import ConfigError  # noqa: E402
 from ordivus.core.policy import OperatorPolicy  # noqa: E402
@@ -121,7 +121,7 @@ def test_plan_create_then_apply_converges(cfg, client):
     assert set(client.acl_users()) == {"admin", "default"}
     first = run(path, "apply")
     assert all(o["status"] == "succeeded" for o in first["operations"] if o["action"] == "CREATE")
-    info = client.execute_command("ACL", "GETUSER", "it_a")
+    info = _getuser(client, "it_a")
     assert info["keys"] == "~app:*" and info["commands"] == "-@all +@read" and "on" in info["flags"]
     second = run(path, "apply")
     assert not [o for o in second["operations"] if o["action"] in engine.MUTATING]
@@ -133,7 +133,7 @@ def test_update_only_declared_fields(cfg, client):
     rep = run(cfg(user("it_u", commands=["+@read", "-keys"])), "apply")
     op = next(o for o in rep["operations"] if o["id"] == "it_u")
     assert op["action"] == "UPDATE" and set(op["changes"]) == {"commands"} and op["status"] == "succeeded"
-    info = client.execute_command("ACL", "GETUSER", "it_u")
+    info = _getuser(client, "it_u")
     assert (info["keys"], info["channels"], info["commands"]) == ("~keep:*", "&chan", "-@all +@read -keys")
 
 
@@ -172,7 +172,7 @@ def test_injection_and_invalid_input_rejected(cfg, client, bad):
 
 def test_prefix_characters_in_patterns_are_literal(cfg, client):
     run(cfg(user("it_p", keys=[">pw", "<h", "#x"], channels=[">c"])), "apply")
-    info = client.execute_command("ACL", "GETUSER", "it_p")
+    info = _getuser(client, "it_p")
     assert info["passwords"] == [] and sorted(info["keys"].split()) == ["~#x", "~<h", "~>pw"]
     assert info["channels"] == "&>c"
 
@@ -279,3 +279,18 @@ def test_existing_privileges_are_not_blocked_only_new_ones(cfg, client):
     assert op["action"] == "BLOCKED" and "flushall" in op["reason"]
     client.execute_command("ACL", "SETUSER", "it_adm", "on", "+@all")  # nicht deklariert: bleibt UNMANAGED
     assert ("it_adm", "UNMANAGED") in actions(engine.run("plan", config.load(path), OperatorPolicy()))
+
+
+def test_getuser_parsed_identically_for_resp2_and_resp3():
+    client_resp2, client_resp3 = (redis.Redis(host=HOST, port=PORT, username="admin", password=ADMIN_PW,
+                                              decode_responses=True, protocol=p) for p in (2, 3))
+    client_resp3.execute_command("ACL", "SETUSER", "it_sel", "on", "~a*", "+get", "(~b* +set)")
+    # redis-py 5 liefert unter RESP3 flags/passwords als set: Mengen vergleichen
+    resp2, resp3 = ({k: sorted(v) if isinstance(v, set | list) and k != "selectors" else v
+                     for k, v in _getuser(c, "it_sel").items()} for c in (client_resp2, client_resp3))
+    assert resp2 == resp3 and resp2["keys"] == "~a*" and resp2["selectors"][0]["keys"] == "~b*"
+
+
+def test_server_version_reported(cfg):
+    rep = run(cfg(user("it_a")), "plan")
+    assert rep["targets"][0]["serverVersion"].startswith(("Redis ", "Valkey "))

@@ -1,6 +1,6 @@
 # Concepts
 
-Ordivus manages **administrative configuration** in systems you already run: users, roles, permissions, databases and policies in PostgreSQL, MySQL, ClickHouse, ArcadeDB, Redis, OpenBao and other systems. You describe the desired state in YAML files; on every run, Ordivus reads the actual state directly from the target system, shows the differences and applies permitted changes.
+Ordivus manages **administrative configuration** in systems you already run: users, roles, permissions, databases and policies in PostgreSQL, MySQL, MariaDB, ClickHouse, MongoDB, ArcadeDB, Redis, Kafka, RabbitMQ, OpenBao, Keycloak, Grafana and other systems. You describe the desired state in YAML files; on every run, Ordivus reads the actual state directly from the target system, shows the differences and applies permitted changes.
 
 ## Stateless
 

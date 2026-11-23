@@ -166,7 +166,7 @@ Target status in the report: `in_sync`, `drift_detected`, `incomplete` (inventor
 
 ## Proxy
 
-The HTTP adapters (OpenBao, ClickHouse, ArcadeDB) and the credential provider `openbao-kv-v2` honor the environment variables `HTTP_PROXY`/`HTTPS_PROXY` (or lowercase) and `NO_PROXY`. If a target is reached via a proxy, Ordivus writes a warning to stderr once per target (`… is reached via proxy …`). Over `http://`, the proxy sees credentials and tokens in plain text; with `https://` it sees only the destination. Therefore add internal targets to `NO_PROXY`. Database drivers (PostgreSQL, MySQL, Redis) do not use a proxy.
+The HTTP adapters (OpenBao, ClickHouse, ArcadeDB, RabbitMQ, Keycloak, Grafana) and the credential provider `openbao-kv-v2` honor the environment variables `HTTP_PROXY`/`HTTPS_PROXY` (or lowercase) and `NO_PROXY`. If a target is reached via a proxy, Ordivus writes a warning to stderr once per target (`… is reached via proxy …`). Over `http://`, the proxy sees credentials and tokens in plain text; with `https://` it sees only the destination. Therefore add internal targets to `NO_PROXY`. Database drivers (PostgreSQL, MySQL, Redis) do not use a proxy.
 
 ## Report
 

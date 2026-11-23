@@ -12,14 +12,10 @@ import urllib.error
 import urllib.request
 
 from ordivus import net
-from ordivus.adapters.base import AuthorizationError, PermanentError, TransientError
+from ordivus.adapters.base import TransientError
 
 TIMEOUT = 10
 RETRIES = 3
-
-
-def tls_context(tls: dict | None) -> ssl.SSLContext:
-    return ssl.create_default_context(cafile=(tls or {}).get("caFile"))
 
 
 def request(url: str, method: str, path: str, token: str | None = None, body: dict | None = None,
@@ -44,19 +40,16 @@ def request(url: str, method: str, path: str, token: str | None = None, body: di
                 raise TransientError(f"openbao {method} {path}: {type(e).__name__}") from None
             time.sleep(0.2 * (attempt + 1))
     try:
-        return status, json.loads(raw) if raw else {}
+        body = json.loads(raw) if raw else {}
     except ValueError:
-        return status, {}
+        body = {}
+    return status, body if isinstance(body, dict) else {}  # Vertrag: immer ein dict
 
 
 def check(status: int, body: dict, what: str) -> dict:
-    """Bildet HTTP-Fehler auf Adapterfehler ab (5xx transient, 401/403 Rechte, sonst permanent)."""
+    """Bildet HTTP-Fehler auf Adapterfehler ab (``net.status_error``)."""
     if status < 300:
         return body
-    errors = "; ".join(str(e) for e in body.get("errors", []))[:300]
-    message = f"{what}: HTTP {status}" + (f" ({errors})" if errors else "")
-    if status >= 500:
-        raise TransientError(message)
-    if status in (401, 403):
-        raise AuthorizationError(message)
-    raise PermanentError(message)
+    errors = body.get("errors")
+    errors = "; ".join(map(str, errors))[:300] if isinstance(errors, list) else ""
+    raise net.status_error(status, f"{what}: HTTP {status}" + (f" ({errors})" if errors else ""))

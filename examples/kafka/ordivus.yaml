@@ -1,0 +1,91 @@
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: events-kafka
+spec:
+  adapter: kafka
+  bootstrapServers: ["kafka-0.kafka.svc.cluster.local:9093", "kafka-1.kafka.svc.cluster.local:9093"]
+  securityProtocol: SASL_SSL
+  mechanism: SCRAM-SHA-512
+  username: ordivus-admin
+  tls:
+    caFile: /trust/ca.pem
+  scram:
+    mechanism: SCRAM-SHA-512
+    iterations: 8192
+  superUsers: ["User:kafka-admin", "User:ordivus-admin"]
+  scope:
+    principals:
+      include: ["User:app-*"]
+  authentication:
+    credentialRef: kafka-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: local-files
+spec:
+  type: file
+  directory: /var/run/ordivus/secrets
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: kafka-admin
+spec:
+  providerRef: local-files
+  path: kafka-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: app-orders-password
+spec:
+  providerRef: local-files
+  path: app-orders
+  lifecycle:
+    generator:
+      length: 40
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KafkaUser
+metadata:
+  name: app-orders
+spec:
+  targetRef: events-kafka
+  credentials:
+    credentialRef: app-orders-password
+    passwordPolicy: verify
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KafkaAcl
+metadata:
+  name: app-orders-produce
+spec:
+  targetRef: events-kafka
+  principal: User:app-orders
+  resourceType: TOPIC
+  resourceName: orders.
+  patternType: PREFIXED
+  operations: [WRITE, DESCRIBE]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KafkaAcl
+metadata:
+  name: app-orders-consume
+spec:
+  targetRef: events-kafka
+  principal: User:app-orders
+  resourceType: GROUP
+  resourceName: app-orders
+  operations: [READ]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: events-kafka-governance
+spec:
+  targetRef: events-kafka
+  mode: authoritative
+  scope:
+    resourceKinds: [KafkaAcl]

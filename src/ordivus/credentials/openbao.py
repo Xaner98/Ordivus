@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from ordivus import openbao_http
+from ordivus.adapters import common
 from ordivus.adapters.base import AdapterError, Secret
 from ordivus.credentials.base import ABSENT, CONFLICT, PRESENT, UNKNOWN, CredentialError, CredentialProvider, State
 
@@ -67,7 +68,7 @@ class OpenBaoKV2Provider(CredentialProvider):
 
     def _call(self, method, path, body=None, token=True):
         if self._ctx is None:
-            self._ctx = openbao_http.tls_context(self.spec.get("tls"))
+            self._ctx = common.tls_context(self.spec.get("tls"))
         return openbao_http.request(self.spec["endpoint"], method, path, self._login() if token else None,
                                     body, self.spec.get("namespace"), self._ctx)
 

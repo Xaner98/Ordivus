@@ -214,6 +214,7 @@ def test_policy_lifecycle_and_self_protection(tmp_path, uid):
         protected=[guard, missing])
     run = lambda mode: engine.run(mode, config.load(directory), OperatorPolicy())  # noqa: E731
     plan = run("plan")
+    assert plan["targets"][0]["serverVersion"].startswith("OpenBao 2.")
     assert ops(plan)[app] == "CREATE"
     assert ops(plan)[admin] == ops(plan)[guard] == ops(plan)["default"] == "BLOCKED"  # Self-Escalation/-Lockout
     blocked = next(o for o in plan["operations"] if o["id"] == missing)  # geschützt, existiert noch nicht

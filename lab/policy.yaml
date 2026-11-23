@@ -1,0 +1,8 @@
+# Operator-Policy für das Lab: Standardprofil, additiv, keine Löschungen, keine privilegierten Grants.
+allowTargets: ["*"]
+allowAuthoritative: false
+allowDelete: false
+allowPasswordReset: true
+allowPrivilegedGrants: false
+profile: standard
+requireTls: false

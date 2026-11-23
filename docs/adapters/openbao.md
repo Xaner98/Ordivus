@@ -4,6 +4,11 @@ Manages OpenBao ACL policies declaratively (`plan`/`drift`/`apply`). Separate fr
 [credential provider `openbao-kv-v2`](../credentials/openbao.md): its own target, its own token.
 HashiCorp Vault compatibility is **not tested**.
 
+**Supported versions:** OpenBao 2.0 or newer (tested: 2.7). The version is read from
+`sys/seal-status` on connect and reported as `serverVersion`; older OpenBao versions are rejected
+as a target error. HashiCorp Vault (detected by `build_date` instead of `commit_date`) is not
+rejected, since the APIs used are the same, but reported as `Vault <version>` with a warning.
+
 ## Target
 
 ```yaml

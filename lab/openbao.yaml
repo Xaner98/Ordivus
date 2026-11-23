@@ -1,0 +1,59 @@
+# OpenBao im Dev-Modus (in-memory, ungeseelt) plus TLS-Listener für die Ordivus-Jobs.
+# Der Dev-Listener (HTTP, Root-Token) lauscht nur auf 127.0.0.1 und dient scripts/lab.sh zum Bootstrap per kubectl exec.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: openbao, namespace: ordivus-lab}
+---
+# TokenReview für die Kubernetes-Auth-Methode (cluster-weit; scripts/lab.sh down löscht es).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: ordivus-lab-openbao-auth-delegator}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator}
+subjects: [{kind: ServiceAccount, name: openbao, namespace: ordivus-lab}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: openbao-listener, namespace: ordivus-lab}
+data:
+  listener.hcl: |
+    listener "tcp" {
+      address       = "0.0.0.0:8201"
+      tls_cert_file = "/tls/tls.crt"
+      tls_key_file  = "/tls/tls.key"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: openbao, namespace: ordivus-lab}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: openbao}}
+  template:
+    metadata: {labels: {app: openbao}}
+    spec:
+      serviceAccountName: openbao
+      containers:
+        - name: openbao
+          image: openbao/openbao:2.7.3@sha256:ba4b133eb9586630024e71a617e66f37f29cc3534cdd46a6233e098ceded8dc9
+          args: [server, -dev, -dev-listen-address=127.0.0.1:8200, -config=/etc/openbao-lab/listener.hcl]
+          env:
+            - name: BAO_DEV_ROOT_TOKEN_ID
+              valueFrom: {secretKeyRef: {name: openbao-root, key: token}}
+          ports: [{containerPort: 8201, name: https}]
+          readinessProbe: {tcpSocket: {port: 8201}, periodSeconds: 2}
+          volumeMounts:
+            - {name: listener, mountPath: /etc/openbao-lab, readOnly: true}
+            - {name: tls, mountPath: /tls, readOnly: true}
+      volumes:
+        - name: listener
+          configMap: {name: openbao-listener}
+        - name: tls
+          secret: {secretName: openbao-tls}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: openbao, namespace: ordivus-lab}
+spec:
+  selector: {app: openbao}
+  ports: [{name: https, port: 8200, targetPort: 8201}]

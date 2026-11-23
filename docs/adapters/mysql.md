@@ -3,6 +3,18 @@
 Manages databases, roles, users and grants in **MySQL 8** (tested with MySQL 8.4).
 Installation: `pip install 'ordivus[mysql]'` (PyMySQL ≥ 1.1). Complete example: `examples/mysql/`.
 
+## Supported versions
+
+| | |
+|---|---|
+| Minimum | MySQL 8.0.16 (`SYSTEM_USER` privilege, which protects `root` and other system accounts from accounts with `CREATE USER`) |
+| Tested | MySQL 8.4 |
+
+Ordivus reads `VERSION()` on connect and reports it as `serverVersion` (e.g. `MySQL 8.4.3`). Older servers
+fail with `MySQL <version> is not supported (minimum 8.0.16)` before any discovery (exit code 13).
+A MariaDB server is rejected with a pointer to the [`mariadb` adapter](mariadb.md): MariaDB stores roles,
+default roles and global privileges differently.
+
 Kinds in execution order: `Database`, `DatabaseRole`, `DatabaseUser`, `Grant`
 (deletions in reverse order).
 

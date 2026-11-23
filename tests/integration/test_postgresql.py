@@ -394,3 +394,76 @@ def test_membership_in_login_roles_or_outside_scope(pg):
         assert set(allowed) == {p + "b"} and "outside spec.scope.roles" in allowed[p + "b"]
     finally:
         pg.sql("DROP ROLE {}", "oit_outside_" + p)
+
+
+def test_single_table_grants_are_not_a_tables_in_schema_grant(pg):
+    """Rechte auf nur einem Teil der Tabellen ergeben keinen Grant mit privileges: [] (sonst UNMANAGED-Rauschen
+    bzw. im authoritative-Modus DELETE → REVOKE auf alle Tabellen)."""
+    p = pg.p
+    for k in ("partial", "full"):
+        pg.sql("CREATE ROLE {} NOLOGIN", p + k)
+    pg.sql("CREATE DATABASE {}", p + "db")
+    pg.sql("CREATE SCHEMA app; CREATE TABLE app.t1 (i int); CREATE TABLE app.t2 (i int); "
+           "GRANT SELECT ON app.t1 TO {}; GRANT SELECT ON ALL TABLES IN SCHEMA app TO {}; GRANT INSERT ON app.t1 TO {}",
+           p + "partial", p + "full", p + "full", dbname=p + "db")
+    partial_id = grant_id(p + "partial", p + "db", "tables-in-schema", "app")
+    full_id = grant_id(p + "full", p + "db", "tables-in-schema", "app")
+
+    additive = run(pg.cfg(), "plan")
+    assert not any(o["id"] == partial_id for o in additive["operations"])
+    assert ("Grant", full_id, "UNMANAGED") in actions(additive)
+
+    policy = doc("ReconciliationPolicy", "gov", targetRef="pg", mode="authoritative",
+                 scope={"resourceKinds": ["Grant"]})
+    rep = run(pg.cfg(policy), "apply", allowAuthoritative=True, allowDelete=True)
+    assert ("Grant", full_id, "DELETE") in actions(rep) and report.exit_code(rep) == 0, rep["operations"]
+    assert not any(o["id"] == partial_id for o in rep["operations"])
+
+    def has(role, privilege, table):
+        with connect(dbname=p + "db") as conn:
+            return conn.execute("SELECT has_table_privilege(%s, %s, %s)", (p + role, table, privilege)).fetchone()[0]
+
+    assert has("partial", "SELECT", "app.t1")  # Einzeltabellen-Grant bleibt unberührt
+    assert not has("full", "SELECT", "app.t2") and has("full", "INSERT", "app.t1")  # DELETE entzieht nur SELECT
+
+
+def test_server_version_is_read_and_reported(pg):
+    adapter = PostgreSQLAdapter()
+    with adapter.connect(pg.target(), Secret(ADMIN_PW), False) as session:
+        assert adapter.server_version(session).startswith("PostgreSQL 17.")
+    assert run(pg.cfg(), "plan")["targets"][0]["serverVersion"].startswith("PostgreSQL 17.")
+
+
+class _FakeConn:
+    def __init__(self, version):
+        self.info = type("Info", (), {"server_version": version})()
+
+
+def test_versions_below_minimum_are_rejected(monkeypatch):
+    from contextlib import contextmanager
+
+    from ordivus.adapters import postgresql
+
+    @contextmanager
+    def fake_open(params):
+        yield _FakeConn(120005)
+
+    monkeypatch.setattr(postgresql, "_open", fake_open)
+    target = {"endpoint": {"host": "h", "user": "u"}}
+    with pytest.raises(PermanentError, match=r"^PostgreSQL 12\.5 is not supported \(minimum PostgreSQL 13\)$"), \
+            PostgreSQLAdapter().connect(target, None, False):
+        pass
+    old = postgresql.Session(None, target, None, False, 90624)
+    assert PostgreSQLAdapter().server_version(old) == "PostgreSQL 9.6.24"
+
+
+def test_maintain_is_blocked_before_postgresql_17():
+    from ordivus.adapters.postgresql import Session
+
+    adapter = PostgreSQLAdapter()
+    grant = adapter.desired(doc("Grant", "g", grantee="r", database="d", on="tables-in-schema", schema="s",
+                                privileges=["maintain", "select"]))
+    pg16 = Session(None, {"endpoint": {}}, None, False, 160004)
+    assert adapter.check(pg16, grant, allow_privileged=True) \
+        == "MAINTAIN requires PostgreSQL 17 or later (server is PostgreSQL 16.4)"
+    assert adapter.check(Session(None, {"endpoint": {}}, None, False, 170002), grant, allow_privileged=True) is None

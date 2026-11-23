@@ -6,6 +6,11 @@ Kinds in execution order: `Database`, `DatabaseRole`, `DatabaseUser`, `Grant` (d
 
 A complete example is in [`examples/clickhouse/`](../../examples/clickhouse/ordivus.yaml).
 
+## Supported versions
+
+- Minimum: **ClickHouse 25.8** (LTS). `connect` reads `version()`; older servers fail with "ClickHouse <v> is not supported (minimum 25.8)" before any discovery. The version appears as `serverVersion` in the report.
+- Tested: 25.8 (`clickhouse/clickhouse-server:25.8`). Newer releases are expected to work; the adapter relies only on `system.privileges`, `system.grants`, `system.users`, `system.roles`, `system.role_grants`.
+
 ## Target
 
 ```yaml
@@ -32,6 +37,7 @@ spec:
 - `host` is a plain hostname or IP address (no `/`, `@`, `?`, `#`, spaces). Ordivus never follows redirects (the Basic Auth header would otherwise go to the redirect target); a redirect is an error.
 - Errors are classified via the `X-ClickHouse-Exception-Code` header: permission/login errors (497, 516, 192) → `AuthorizationError` (kind `forbidden`), timeouts/network/overload → `TransientError`, everything else → `PermanentError`.
 - `plan` and `drift` send the setting `readonly=2` with **every** request; ClickHouse then rejects any DDL/DCL (code 164 `READONLY`). In addition, the adapter refuses `apply` on a read-only session.
+- Exception: if the login's settings profile already enforces `readonly` ≥ 1 (read via `getSetting('readonly')` on connect), the setting is not sent – ClickHouse rejects any attempt to change `readonly` for such a login, even to the same restriction. The server already blocks writes then. A read-only login is therefore a good choice for `plan`/`drift`-only targets.
 
 ## Kind `Database`
 
@@ -79,16 +85,17 @@ All fields are optional; fields you omit are not managed (never reset).
 
 - `roles`: changes are applied as `GRANT`/`REVOKE` of the difference.
 - `defaultRoles`: the effective set from `system.role_grants.granted_role_is_default` is compared. If omitted, the ClickHouse default `DEFAULT ROLE ALL` applies.
-- `hostIp`/`hostNames`: lists, compared sorted. `::/0` means "from anywhere" (ClickHouse stores `ANY` this way; a list containing `::/0` is normalized to `["::/0"]`). If either field changes, the entire host list is set anew; undeclared entries (including `REGEXP`/`LIKE`) are preserved. Addresses are checked during validation. If omitted, a new user is created with `HOST ANY`.
+- `hostIp`/`hostNames`: lists, compared sorted. `hostIp` is normalized the way ClickHouse stores it: host bits cleared (`10.0.0.1/8` → `10.0.0.0/8`), no `/32`/`/128` suffix, lowercase IPv6. `::/0` or `0.0.0.0/0` means "from anywhere" (ClickHouse stores `ANY` as `::/0`; such a list is normalized to `["::/0"]`). Loopback addresses (`127.0.0.0/8`, `::1`, `::ffff:127.…`) are rejected: ClickHouse stores them as host name `localhost`, so declare `hostNames: [localhost]`. If either field changes, the entire host list is set anew; undeclared entries (including `REGEXP`/`LIKE`) are preserved. Addresses are checked during validation. If omitted, a new user is created with `HOST ANY`.
 - A new user is first created with `HOST NONE` and only enabled afterwards, so it is never briefly reachable from anywhere.
 
 ### Passwords
 
 - Passwords are set as `IDENTIFIED WITH sha256_password BY '…'`. Apart from name and password, the statement contains no variable parts: ClickHouse masks passwords in `system.query_log` and in the server log, **unless** a statement already fails during parsing – then it would appear in plaintext in the log.
-- `passwordPolicy: verify` checks by attempting a login (`SELECT 1` as this user, also with `readonly=2`): error 516 `AUTHENTICATION_FAILED` ⇒ wrong password (`SET_PASSWORD`), success ⇒ matches, anything else ⇒ `UNKNOWN`.
+- `passwordPolicy: verify` checks by attempting a login (`SELECT 1` as this user): error 516 `AUTHENTICATION_FAILED` ⇒ wrong password (`SET_PASSWORD`), success ⇒ matches, anything else ⇒ `UNKNOWN`.
   **Caution:** If the user is restricted via `hostIp`/`hostNames` to addresses Ordivus does not connect from, ClickHouse also reports 516. Then `SET_PASSWORD` would be planned on every run. In that case use `passwordPolicy: set-on-create` or `enforce`.
 - A user **without** `spec.credentials` is created with a random password that is stored nowhere (not with `no_password`); it can only log in once someone sets a password.
 - User names containing `:` cannot be verified via Basic Auth (`UNKNOWN`).
+- **Multiple authentication methods** (ClickHouse 24.9+): `ALTER USER … IDENTIFIED WITH …` replaces *all* methods of a user (further passwords, SSH keys, certificates, LDAP …). `SET_PASSWORD` therefore fails ("would replace all of them, refusing") unless the user has exactly one password method (`sha256_password`, `plaintext_password`, `double_sha1_password`, `bcrypt_password` or `no_password`). `verify` succeeds if *any* method accepts the password.
 
 ## Kind `Grant`
 
@@ -108,7 +115,13 @@ A grant object is the set of privileges of one grantee on exactly one object. Th
 
 **Normalization and pitfalls:** ClickHouse stores privileges in its own form (`system.grants`) – groups are expanded, complete groups are collapsed again. Ordivus compares uppercase with single spaces, sorted and without duplicates. To keep the comparison stable:
 
-- Specify privileges the way `SHOW GRANTS` shows them. If you, for example, declare all four `SHOW …` sub-privileges individually, you get a permanent `UPDATE`, because ClickHouse collapses them into `SHOW`.
+- Specify privileges the way `SHOW GRANTS` shows them. Declarations ClickHouse would store differently are `BLOCKED` in the plan with the reason, instead of producing a permanent `UPDATE`:
+  - aliases (`UPDATE` is stored as `ALTER UPDATE`, `SHUTDOWN` as `SYSTEM SHUTDOWN` …): declare the canonical name from `system.privileges`;
+  - a privilege together with its group in the same grant (`ALTER`, `ALTER UPDATE`): ClickHouse keeps only the group;
+  - all sub-privileges of a group (e.g. all `ALTER INDEX` children): declare the group.
+  Groups that ClickHouse collapses only on certain object levels (e.g. all table-level `ALTER …` on a table) are not detected.
+- **Grants covered by a broader grant** are `BLOCKED`: if the grantee holds `SELECT` on `db.*` or `*.*`, ClickHouse stores no separate `SELECT` on `db.t` (granting it is a no-op, `system.grants` never shows it). Ordivus reports this ("already granted … on a broader object") instead of planning `CREATE` on every run; remove the narrower declaration or manage the broader grant. If the grantee has partial revokes on that database or `*.*`, the check is skipped (ClickHouse then shows narrower grants individually).
+- When a grant's privileges change, `REVOKE` runs before `GRANT`, so that replacing a group by one of its sub-privileges (`ALTER` → `ALTER UPDATE`) does not revoke the new privilege again.
 - `ALL`/`ALL PRIVILEGES`, `NONE`/`USAGE`/`NO PRIVILEGES` and `CURRENT GRANTS` are always rejected during validation: they expand server-side (`CURRENT GRANTS` = all permissions of the Ordivus login, i.e. full access including user management).
 - Grants on the system databases `system`, `information_schema` and `INFORMATION_SCHEMA` are always rejected.
 - Unknown privilege names (not in `system.privileges`, not even as an alias) are `BLOCKED`.

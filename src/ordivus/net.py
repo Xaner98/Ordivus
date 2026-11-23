@@ -4,12 +4,13 @@ Folgt nie Redirects: urllib schickte sonst ``X-Vault-Token``/``Authorization`` a
 auch an fremde Hosts und von https auf http. Nur http/https; Antwortkörper sind auf ``MAX_BODY`` begrenzt.
 """
 
+import http.client
 import logging
 import ssl
 import urllib.request
 from urllib.parse import urlsplit
 
-from ordivus.adapters.base import PermanentError
+from ordivus.adapters.base import AdapterError, AuthorizationError, PermanentError, TransientError
 
 MAX_BODY = 16 * 1024 * 1024
 SCHEMES = ("http", "https")
@@ -35,12 +36,29 @@ def urlopen(req: urllib.request.Request, timeout: float, context: ssl.SSLContext
         log.warning("%s://%s is reached via proxy %s (from %s_PROXY; exclude with NO_PROXY)",
                     url.scheme, url.netloc, urlsplit(proxy).hostname, url.scheme.upper())
     opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=context))
-    return opener.open(req, timeout=timeout)
+    try:
+        return opener.open(req, timeout=timeout)
+    except http.client.HTTPException as e:
+        if isinstance(e, OSError):  # RemoteDisconnected: Aufrufer behandeln es als Verbindungsfehler
+            raise
+        raise TransientError(f"invalid HTTP response from {url.hostname}: {type(e).__name__}") from None
 
 
 def read(fp) -> bytes:
     """Liest einen Antwortkörper (auch ``HTTPError``) mit Obergrenze."""
-    body = fp.read(MAX_BODY + 1)
+    try:
+        body = fp.read(MAX_BODY + 1)
+    except http.client.HTTPException as e:  # z. B. IncompleteRead: Verbindung mitten in der Antwort abgebrochen
+        raise TransientError(f"incomplete HTTP response: {type(e).__name__}") from None
     if len(body) > MAX_BODY:
         raise PermanentError(f"response body exceeds {MAX_BODY} bytes")
     return body
+
+
+def status_error(status: int, message: str) -> AdapterError:
+    """Fehler für einen HTTP-Status >= 400: 5xx und 429 transient, 401/403 Rechte, sonst permanent."""
+    if status >= 500 or status == 429:
+        return TransientError(message)
+    if status in (401, 403):
+        return AuthorizationError(message)
+    return PermanentError(message)

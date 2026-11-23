@@ -1,4 +1,4 @@
-FROM python:3.14-alpine
+FROM python:3.14-slim
 COPY pyproject.toml /tmp/p/pyproject.toml
 RUN python -c "import tomllib;d=tomllib.load(open('/tmp/p/pyproject.toml','rb'))['project'];print('\n'.join(d['dependencies']+[x for v in d.get('optional-dependencies',{}).values() for x in v]))" > /tmp/req.txt \
  && pip install -q --root-user-action=ignore -r /tmp/req.txt

@@ -16,7 +16,7 @@ You describe the desired state in YAML. On every run, Ordivus reads the actual s
 
 ## Why Ordivus?
 
-- **One workflow for many systems.** PostgreSQL, MySQL, ClickHouse, ArcadeDB, Redis and OpenBao with the same configuration shape, the same commands, the same exit codes and the same report format.
+- **One workflow for many systems.** PostgreSQL, MySQL, MariaDB, ClickHouse, MongoDB, ArcadeDB, Redis, Kafka, RabbitMQ, OpenBao, Keycloak and Grafana with the same configuration shape, the same commands, the same exit codes and the same report format.
 - **Stateless.** The truth lives in your configuration and in the target system. That is why Ordivus also sees objects someone created by hand.
 - **Safe by default.** Undeclared objects are only reported, never silently deleted. Deleting requires an explicitly bounded scope *and* a separately managed operator policy. Anything that cannot be read completely counts as unknown – not as empty.
 - **Secrets stay secret.** Passwords never appear in the configuration, and never in reports or logs. Ordivus generates missing passwords in a cryptographically secure way and stores them *create-if-absent* in your secret store (file/Kubernetes Secret or OpenBao).
@@ -33,6 +33,14 @@ You describe the desired state in YAML. On every run, Ordivus reads the actual s
 | ArcadeDB | Databases, users with groups per database | [docs/adapters/arcadedb.md](docs/adapters/arcadedb.md) |
 | Redis | ACL users (keys, channels, commands) | [docs/adapters/redis.md](docs/adapters/redis.md) |
 | OpenBao | ACL policies | [docs/adapters/openbao.md](docs/adapters/openbao.md) |
+| MariaDB | Databases, roles, accounts, role assignments, grants | [docs/adapters/mariadb.md](docs/adapters/mariadb.md) |
+| MongoDB | Custom roles, users with roles | [docs/adapters/mongodb.md](docs/adapters/mongodb.md) |
+| RabbitMQ | Virtual hosts, users with tags and permissions | [docs/adapters/rabbitmq.md](docs/adapters/rabbitmq.md) |
+| Keycloak | Realms, realm roles, groups, OIDC clients (incl. client secret) | [docs/adapters/keycloak.md](docs/adapters/keycloak.md) |
+| Kafka | SCRAM users, ACLs | [docs/adapters/kafka.md](docs/adapters/kafka.md) |
+| Grafana | Teams, folders with permissions, service accounts | [docs/adapters/grafana.md](docs/adapters/grafana.md) |
+
+Every adapter reads the server version on connect, reports it as `serverVersion` and refuses versions below its documented minimum.
 
 Secret sources: files or mounted Kubernetes Secrets, [OpenBao KV v2](docs/credentials/openbao.md) and – for development only – environment variables.
 
@@ -41,11 +49,11 @@ Secret sources: files or mounted Kubernetes Secrets, [OpenBao KV v2](docs/creden
 Requirement: Python 3.13 or newer.
 
 ```sh
-pip install "ordivus[postgresql,mysql,redis] @ git+https://github.com/Xaner98/Ordivus.git"
+pip install "ordivus[postgresql,mysql,mariadb,mongodb,redis,kafka] @ git+https://github.com/Xaner98/Ordivus.git"
 ordivus --version
 ```
 
-The extras install the database drivers. ClickHouse, ArcadeDB and OpenBao need no additional packages. Install only what you need, e.g. `ordivus[postgresql]`.
+The extras install the client libraries. ClickHouse, ArcadeDB, OpenBao, RabbitMQ, Keycloak and Grafana need no additional packages. Install only what you need, e.g. `ordivus[postgresql]`.
 
 As a container image (contains all adapters, runs as a non-root user with a read-only file system):
 
@@ -106,7 +114,7 @@ ordivus apply -f config    # nothing left to do
 - [Configuration](docs/configuration.md) – file structure, engine kinds, operator policy, exit codes, report format
 - [Quickstart](docs/quickstart.md)
 - [Kubernetes and CI/CD](docs/kubernetes.md) – Helm chart, job templates, GitLab, Jenkins, Argo CD, Flux
-- Adapters: [PostgreSQL](docs/adapters/postgresql.md) · [MySQL](docs/adapters/mysql.md) · [ClickHouse](docs/adapters/clickhouse.md) · [ArcadeDB](docs/adapters/arcadedb.md) · [Redis](docs/adapters/redis.md) · [OpenBao](docs/adapters/openbao.md)
+- Adapters: [PostgreSQL](docs/adapters/postgresql.md) · [MySQL](docs/adapters/mysql.md) · [ClickHouse](docs/adapters/clickhouse.md) · [ArcadeDB](docs/adapters/arcadedb.md) · [Redis](docs/adapters/redis.md) · [OpenBao](docs/adapters/openbao.md) · [MariaDB](docs/adapters/mariadb.md) · [MongoDB](docs/adapters/mongodb.md) · [RabbitMQ](docs/adapters/rabbitmq.md) · [Keycloak](docs/adapters/keycloak.md) · [Kafka](docs/adapters/kafka.md) · [Grafana](docs/adapters/grafana.md)
 - Secret sources: [OpenBao KV v2](docs/credentials/openbao.md)
 - [Development and contributing](docs/development.md)
 - Examples: [`examples/`](examples/)

@@ -121,7 +121,8 @@ def render_human(report: dict) -> str:
     lines = [f"ordivus {run['mode']}  config {run['configDigest']}  engine {run['engineVersion']}"]
     for t in report["targets"]:
         inventory = ", ".join(f"{k} {i['status']} ({i['count']})" for k, i in t["inventory"].items())
-        lines.append(f"\ntarget {t['targetId']} [{t['adapter']}]: {t['status']}"
+        server = f" ({t['serverVersion']})" if t.get("serverVersion") else ""
+        lines.append(f"\ntarget {t['targetId']} [{t['adapter']}]{server}: {t['status']}"
                      + (f" - {t['reason']}" if t.get("reason") else ""))
         if inventory:
             lines.append(f"  inventory: {inventory}")

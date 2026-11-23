@@ -2,7 +2,8 @@
 
 Kinds: ``Database``, ``DatabaseRole``, ``DatabaseUser``, ``Grant`` (Doku: docs/adapters/clickhouse.md).
 Anmeldung per Basic Auth im Header, SQL nur im POST-Body. Read-only-Sessions senden bei jeder
-Anfrage ``readonly=2``; ``apply`` verweigert zusätzlich auf Read-only-Sessions.
+Anfrage ``readonly=2``, außer der Server erzwingt für den Login schon ``readonly`` ≥ 1 (Profil);
+``apply`` verweigert zusätzlich auf Read-only-Sessions.
 """
 
 import base64
@@ -19,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from ordivus import net
+from ordivus.adapters import common
 from ordivus.adapters.base import (
     COMPLETE,
     CREATE,
@@ -47,7 +49,10 @@ PRIVILEGED_GROUPS = frozenset({
     "KILL QUERY", "KILL TRANSACTION", "NAMED COLLECTION ADMIN", "SET DEFINER", "CLUSTER", "TABLE ENGINE",
     "MOVE PARTITION BETWEEN SHARDS", "CREATE FUNCTION", "DROP FUNCTION"})
 PRIVILEGED_LEVELS = frozenset({"SOURCE", "USER_NAME", "NAMED_COLLECTION", "DEFINER"})
-HOST_FORBIDDEN = re.compile(r"[/@?#\\\[\]\s]")
+MIN_VERSION = (25, 8)  # älteste LTS-Linie, gegen die die Integrationstests laufen
+# Nur diese Methoden ersetzt SET_PASSWORD ohne Verlust (ALTER USER … IDENTIFIED ersetzt ALLE Methoden)
+PASSWORD_AUTH = frozenset({"no_password", "plaintext_password", "sha256_password", "double_sha1_password",
+                           "bcrypt_password"})
 SQL_STORAGES = frozenset({"local_directory", "replicated"})  # alles andere (users_xml …) ist nicht per SQL änderbar
 AUTH_FAILED = 516
 AUTH_CODES = frozenset({497, 516, 192})  # ACCESS_DENIED, AUTHENTICATION_FAILED, UNKNOWN_USER
@@ -77,6 +82,19 @@ def privilege(name: str) -> str:
     return " ".join(name.split()).upper()
 
 
+def host_ip(value: str) -> str:
+    """Form, in der ClickHouse eine Adresse/ein Netz speichert: Netzadresse, ohne /32 bzw. /128, Hex klein."""
+    net_ = ipaddress.ip_network(value, strict=False)
+    return str(net_.network_address) if net_.prefixlen == net_.max_prefixlen else str(net_)
+
+
+def _loopback(value: str) -> bool:
+    """ClickHouse speichert Loopback-Netze (auch ::ffff:127.x) als HOST LOCAL statt als IP."""
+    net_ = ipaddress.ip_network(value, strict=False)
+    return all((getattr(a, "ipv4_mapped", None) or a).is_loopback
+               for a in (net_.network_address, net_.broadcast_address))
+
+
 def grant_id(grantee: str, database: str | None, table: str | None) -> str:
     return f"{qi(grantee)} ON {qi(database) if database else '*'}.{qi(table) if table else '*'}"
 
@@ -89,6 +107,8 @@ class Session:
     context: ssl.SSLContext | None
     timeout: float
     write: bool
+    guard: bool = True  # readonly=2 senden (nur ohne write); aus, wenn der Server readonly schon erzwingt
+    version: str | None = None
     include: list[str] | None = None  # scope.databases.include
     cache: dict = field(default_factory=dict)  # Lookups je Lauf (system.privileges, Rollen des Admins)
 
@@ -109,7 +129,7 @@ def _error(status: int, code: str | None, text: str) -> Exception:
 def _post(s: Session, sql: str, secret: bool = False) -> list[dict]:
     """Führt ``sql`` aus; SELECTs müssen ``FORMAT JSON`` enden. ``secret``: Statement enthält ein
     Passwort, daher wird die Servermeldung (kann das Statement zitieren) nicht übernommen."""
-    params = {"wait_end_of_query": "1", **({} if s.write else {"readonly": "2"})}
+    params = {"wait_end_of_query": "1", **({} if s.write or not s.guard else {"readonly": "2"})}
     auth = base64.b64encode(f"{s.user}:{s.password.reveal() if s.password else ''}".encode()).decode()
     req = urllib.request.Request(f"{s.url}/?{urllib.parse.urlencode(params)}", data=sql.encode(), method="POST",
                                  headers={"Authorization": f"Basic {auth}"})
@@ -140,12 +160,7 @@ def _post(s: Session, sql: str, secret: bool = False) -> list[dict]:
 def _session(target: dict, user: str, password: Secret | None, write: bool) -> Session:
     endpoint = target["endpoint"]
     tls = endpoint.get("tls")
-    context = None
-    if tls is not None:
-        try:
-            context = ssl.create_default_context(cafile=tls.get("caFile"))
-        except (OSError, ssl.SSLError) as e:
-            raise PermanentError(f"cannot load TLS CA file: {type(e).__name__}") from None
+    context = None if tls is None else common.tls_context(tls)
     host = endpoint["host"]
     host = f"[{host}]" if ":" in host else host
     port = endpoint.get("port", 8443 if tls is not None else 8123)
@@ -171,6 +186,7 @@ def _roles(names) -> str:
 
 class ClickHouseAdapter(Adapter):
     id = "clickhouse"
+    api_version = 1
     kinds = ("Database", "DatabaseRole", "DatabaseUser", "Grant")
     password_kinds = ("DatabaseUser",)
 
@@ -181,26 +197,13 @@ class ClickHouseAdapter(Adapter):
             endpoint = spec.get("endpoint")
             if not isinstance(endpoint, dict):
                 return [*errors, "spec.endpoint must be a mapping"]
-            errors += [f"unknown field spec.endpoint.{k}" for k in endpoint
-                       if k not in {"host", "port", "user", "tls", "timeoutSeconds"}]
-            host = endpoint.get("host")
-            if not isinstance(host, str) or not host or HOST_FORBIDDEN.search(host):
-                errors.append("spec.endpoint.host must be a host name or IP address (no '/', '@', '?', '#', spaces)")
-            if "port" in endpoint and (type(endpoint["port"]) is not int or not 0 < endpoint["port"] < 65536):
-                errors.append("spec.endpoint.port must be an integer 1..65535")
+            errors += common.validate_endpoint(endpoint, extra=("user", "timeoutSeconds"))
             user = endpoint.get("user", "default")
             if not isinstance(user, str) or not user or ":" in user:  # Basic Auth trennt am ersten ':'
                 errors.append("spec.endpoint.user must be a non-empty string without ':'")
             timeout = endpoint.get("timeoutSeconds", 30)
             if type(timeout) not in (int, float) or timeout <= 0:
                 errors.append("spec.endpoint.timeoutSeconds must be a positive number")
-            tls = endpoint.get("tls", {})
-            if not isinstance(tls, dict):
-                errors.append("spec.endpoint.tls must be a mapping")
-            else:
-                errors += [f"unknown field spec.endpoint.tls.{k}" for k in tls if k != "caFile"]
-                if not isinstance(tls.get("caFile", "x"), str):
-                    errors.append("spec.endpoint.tls.caFile must be a string")
             scope = spec.get("scope", {})
             if not isinstance(scope, dict):
                 return [*errors, "spec.scope must be a mapping"]
@@ -220,7 +223,9 @@ class ClickHouseAdapter(Adapter):
         if "hostIp" in spec and not _strings(spec["hostIp"], ""):
             for ip in spec["hostIp"]:
                 try:
-                    ipaddress.ip_network(ip, strict=False)
+                    if _loopback(ip):
+                        errors.append(f"spec.hostIp: loopback {ip!r} is stored by ClickHouse as host name "
+                                      "'localhost'; use hostNames: [localhost]")
                 except ValueError:
                     errors.append(f"spec.hostIp: invalid address or network {ip!r}")
         if kind == "Grant":
@@ -252,7 +257,9 @@ class ClickHouseAdapter(Adapter):
             return Resource(kind, name)
         if kind == "DatabaseUser":
             attrs = {k: sorted(set(spec[k])) for k in FIELDS[kind] if k in spec}
-            if "::/0" in attrs.get("hostIp", []):  # ClickHouse speichert ANY nur als ::/0
+            if "hostIp" in attrs:
+                attrs["hostIp"] = sorted({host_ip(ip) for ip in attrs["hostIp"]})
+            if {"::/0", "0.0.0.0/0"} & set(attrs.get("hostIp", [])):  # ClickHouse speichert ANY nur als ::/0
                 attrs["hostIp"] = ["::/0"]
             return Resource(kind, name, attrs)
         grantee, db, table = spec["grantee"], spec.get("database"), spec.get("table")
@@ -267,8 +274,18 @@ class ClickHouseAdapter(Adapter):
     def connect(self, target, secret, write):
         session = _session(target, target["endpoint"].get("user", "default"), secret, write)
         session.include = ((target.get("scope") or {}).get("databases") or {}).get("include")
-        session.user = _post(session, "SELECT currentUser() AS u FORMAT JSON")[0]["u"]  # Selbstschutz: echter Name
+        # Ohne readonly=2 gefragt: ein Login mit readonly-Profil lehnt jede Änderung von readonly ab (Code 164)
+        session.guard = False
+        row = _post(session, "SELECT currentUser() AS u, version() AS v, getSetting('readonly') AS ro FORMAT JSON")[0]
+        session.user, session.version, session.guard = row["u"], row["v"], int(row["ro"]) == 0  # u: Selbstschutz
+        found = re.match(r"(\d+)\.(\d+)", session.version)
+        if not found or tuple(map(int, found.groups())) < MIN_VERSION:
+            raise PermanentError(f"ClickHouse {session.version} is not supported "
+                                 f"(minimum {'.'.join(map(str, MIN_VERSION))})")
         yield session
+
+    def server_version(self, session):
+        return f"ClickHouse {session.version}"
 
     # --- Rechte-Prüfung (INV-10) ---------------------------------------------------------------
 
@@ -352,17 +369,54 @@ class ClickHouseAdapter(Adapter):
             unknown = [p for p in attrs["privileges"] if self._privileged(session, p) is None]
             if unknown:
                 return f"unknown privilege(s) {', '.join(unknown)}"
-            if allow_privileged:
-                return None
-            found = [p for p in attrs["privileges"] if self._privileged(session, p)]
-            if attrs["database"] is None:
-                found.insert(0, "global grant on *.*")
-            return f"privileged ({', '.join(found)}) requires operator policy allowPrivilegedGrants" if found else None
+            if not allow_privileged:
+                found = [p for p in attrs["privileges"] if self._privileged(session, p)]
+                if attrs["database"] is None:
+                    found.insert(0, "global grant on *.*")
+                if found:
+                    return f"privileged ({', '.join(found)}) requires operator policy allowPrivilegedGrants"
+            return self._unstable(session, attrs)
         if resource.kind == "DatabaseUser":
             strong = (set(attrs.get("roles", [])) | set(attrs.get("defaultRoles", []))) & (powerful | admin_roles)
             if strong and not allow_privileged:
                 return (f"role(s) {', '.join(sorted(strong))} carry privileged grants or belong to the Ordivus "
                         "login; requires operator policy allowPrivilegedGrants")
+        return None
+
+    def _unstable(self, session, attrs) -> str | None:
+        """Grund, wenn ClickHouse die deklarierten Rechte anders speichert als deklariert (sonst ewige Drift)."""
+        names, parent, _ = self._privileges(session)
+        want = set(attrs["privileges"])
+        if aliases := [f"{p} (= {names[p]})" for p in sorted(want) if names[p] != p]:
+            return f"privilege alias(es) {', '.join(aliases)}; declare the canonical name"
+
+        def ancestors(p):
+            out = []
+            while (p := parent.get(p)) is not None and p not in out:
+                out.append(p)
+            return out
+
+        if inner := [f"{p} (in {a})" for p in sorted(want) for a in ancestors(p) if a in want]:
+            return f"privilege(s) {', '.join(inner)} already contained in a declared group"
+        for group in sorted(set(parent.values()) - {None, "ALL"}):
+            children = {c for c, g in parent.items() if g == group}
+            if children <= want:
+                return f"all sub-privileges of {group} declared; declare {group} instead"
+        # Ein breiterer Grant (db.* bzw. *.*) verschluckt den engeren: ClickHouse speichert ihn nicht separat
+        if "grants" not in session.cache:
+            session.cache["grants"] = _post(
+                session, "SELECT user_name, role_name, access_type, database, table, column, is_partial_revoke "
+                         "FROM system.grants FORMAT JSON")
+        db, table = attrs["database"], attrs["table"]
+        broader = {(None, None), (db, None)} - {(db, table)} if db else set()
+        mine = [r for r in session.cache["grants"] if attrs["grantee"] in (r["user_name"], r["role_name"])]
+        if any(r["is_partial_revoke"] and r["database"] in (None, db) for r in mine):
+            return None  # Teil-Revokes: Abdeckung nicht sicher bestimmbar, engere Grants zeigt ClickHouse dann einzeln
+        covered = sorted(p for p in want for r in mine if r["column"] is None and (r["database"], r["table"]) in broader
+                         and privilege(r["access_type"]) in {p, *ancestors(p)})
+        if covered:
+            return (f"privilege(s) {', '.join(dict.fromkeys(covered))} already granted to {attrs['grantee']!r} on a "
+                    "broader object (db.* or *.*); ClickHouse keeps no separate narrower grant, remove it here")
         return None
 
     def discover(self, session, kind, scope):
@@ -439,16 +493,22 @@ class ClickHouseAdapter(Adapter):
                 _post(session, f"DROP {noun} IF EXISTS {qi(op.id)}")
             return
         if op.action == SET_PASSWORD:
+            rows = _post(session, f"SELECT auth_type FROM system.users WHERE name = {qs(op.id)} FORMAT JSON")
+            methods = rows[0]["auth_type"] if rows else []
+            if len(methods) > 1 or set(methods) - PASSWORD_AUTH:
+                raise PermanentError(f"DatabaseUser {op.id!r} has authentication methods {', '.join(methods)}; "
+                                     "setting the password would replace all of them, refusing")
             _post(session, f"ALTER USER {qi(op.id)} IDENTIFIED WITH sha256_password BY {qs(op.password.reveal())}",
                   secret=True)
             return
         want = op.desired.attrs
         if op.kind == "Grant":
             old = set(op.changes["privileges"][0] or []) if op.action == UPDATE else set()
-            if added := sorted(set(want["privileges"]) - old):
-                _post(session, f"GRANT {', '.join(added)} ON {self._on(want)} TO {qi(want['grantee'])}")
+            # erst REVOKE: ein entzogenes Gruppenrecht nähme sonst gerade gewährte Unterrechte mit
             if removed := sorted(old - set(want["privileges"])):
                 _post(session, f"REVOKE {', '.join(removed)} ON {self._on(want)} FROM {qi(want['grantee'])}")
+            if added := sorted(set(want["privileges"]) - old):
+                _post(session, f"GRANT {', '.join(added)} ON {self._on(want)} TO {qi(want['grantee'])}")
             return
         if op.action == CREATE:
             if op.kind == "Database":
@@ -501,7 +561,9 @@ class ClickHouseAdapter(Adapter):
         if ":" in resource.id:
             return None  # Basic Auth kann diesen Namen nicht übertragen
         try:
-            _post(_session(target, resource.id, password, write=False), "SELECT 1 AS ok FORMAT JSON")
+            probe = _session(target, resource.id, password, write=False)
+            probe.guard = False  # fester SELECT; readonly=2 scheiterte an Benutzern mit readonly-Profil (Code 164)
+            _post(probe, "SELECT 1 AS ok FORMAT JSON")
         except AuthorizationError as e:
             return False if e.code == AUTH_FAILED else None
         except (TransientError, PermanentError):

@@ -13,6 +13,7 @@ import secrets
 import pytest
 
 from ordivus import adapters
+from ordivus.adapters import clickhouse as ch_module
 from ordivus.adapters.base import CREATE_SECRET, DELETE, Op, PermanentError, Resource, Secret, TransientError
 from ordivus.adapters.clickhouse import ClickHouseAdapter, _post, _session, grant_id, qi, qs
 from ordivus.core import config, engine
@@ -278,8 +279,9 @@ def test_secret_canary_never_in_output(cfg, caplog, capsys):
 
 def test_validate_rejects_unsafe_values():
     v = CH.validate
-    assert v({"kind": "DatabaseUser", "spec": {"hostIp": ["10.0.0.0/8", "::1"]}}) == []
+    assert v({"kind": "DatabaseUser", "spec": {"hostIp": ["10.0.0.0/8", "2001:db8::1"]}}) == []
     assert v({"kind": "DatabaseUser", "spec": {"hostIp": ["not-an-ip"]}})
+    assert v({"kind": "DatabaseUser", "spec": {"hostIp": ["127.0.0.1"]}})  # ClickHouse: HOST LOCAL
     assert v({"kind": "Database", "spec": {"engine": "Memory; DROP DATABASE x"}})
     for p in ("ALL", "SELECT; DROP USER admin", "SELECT(x)", "all privileges", "CURRENT GRANTS", "current  grants",
               "NONE", "USAGE", "no privileges"):
@@ -406,3 +408,92 @@ def test_admin_roles_are_protected(cfg):
     rep = run(cfg(res("Grant", "g", grantee="oit_adm2", database="oit_db", privileges=["INSERT"])), "apply",
               allowPrivilegedGrants=True)
     assert "protected" in blocked(rep)[grant_id("oit_adm2", "oit_db", None)]
+
+
+def test_server_version_and_minimum(cfg, monkeypatch):
+    with CH.connect({"endpoint": ENDPOINT}, Secret(ADMIN_PW), write=False) as s:
+        assert CH.server_version(s).startswith("ClickHouse 25.")
+    assert run(cfg(), "plan")["targets"][0]["serverVersion"].startswith("ClickHouse ")
+    monkeypatch.setattr(ch_module, "MIN_VERSION", (99, 0))
+    with pytest.raises(PermanentError, match=r"is not supported \(minimum 99.0\)"), \
+            CH.connect({"endpoint": ENDPOINT}, Secret(ADMIN_PW), write=False):
+        pass
+
+
+def test_privilege_aliases_and_groups_are_blocked(cfg):
+    """ClickHouse speichert UPDATE als ALTER UPDATE und fasst Gruppen zusammen: sonst ewige Drift bzw. ein
+    REVOKE ALTER UPDATE nach GRANT UPDATE, das das Recht entzieht."""
+    root("CREATE DATABASE oit_db")
+    for i in range(3):
+        root(f"CREATE ROLE oit_r{i}")
+    root("GRANT ALTER UPDATE ON oit_db.* TO oit_r0")
+    index = [r["privilege"] for r in root("SELECT privilege FROM system.privileges "
+                                          "WHERE parent_group = 'ALTER INDEX' FORMAT JSON")]
+    path = cfg(res("Grant", "a", grantee="oit_r0", database="oit_db", privileges=["update", "select"]),
+               res("Grant", "b", grantee="oit_r1", database="oit_db", privileges=["ALTER", "ALTER UPDATE"]),
+               res("Grant", "c", grantee="oit_r2", database="oit_db", privileges=index))
+    reasons = blocked(run(path, "apply"))
+    assert "UPDATE (= ALTER UPDATE)" in reasons[grant_id("oit_r0", "oit_db", None)]
+    assert "ALTER UPDATE (in ALTER)" in reasons[grant_id("oit_r1", "oit_db", None)]
+    assert "declare ALTER INDEX instead" in reasons[grant_id("oit_r2", "oit_db", None)]
+    assert grants_of("oit_r0") == ["GRANT ALTER UPDATE ON oit_db.* TO oit_r0"]
+    # Gruppe → Unterrecht: erst REVOKE, dann GRANT, sonst nähme das REVOKE ALTER das neue Recht mit
+    root("GRANT ALTER ON oit_db.* TO oit_r1")
+    path = cfg(res("Grant", "b", grantee="oit_r1", database="oit_db", privileges=["ALTER UPDATE"]))
+    assert [o["status"] for o in mutating(run(path, "apply"))] == ["succeeded"]
+    assert grants_of("oit_r1") == ["GRANT ALTER UPDATE ON oit_db.* TO oit_r1"]
+    assert mutating(run(path, "apply")) == []
+
+
+def test_grant_covered_by_broader_grant_is_blocked(cfg):
+    root("CREATE DATABASE oit_db")
+    root("CREATE ROLE oit_r")
+    root("GRANT SELECT ON oit_db.* TO oit_r")
+    root("CREATE ROLE oit_p")
+    root("GRANT SELECT ON *.* TO oit_p")
+    root("REVOKE SELECT ON oit_db.* FROM oit_p")  # Teil-Revoke: der engere Grant ist wieder sichtbar
+    path = cfg(res("Grant", "t", grantee="oit_r", database="oit_db", table="t", privileges=["SELECT", "INSERT"]),
+               res("Grant", "p", grantee="oit_p", database="oit_db", table="t", privileges=["SELECT"]))
+    rep = run(path, "apply")
+    assert "SELECT already granted to 'oit_r' on a broader object" in blocked(rep)[grant_id("oit_r", "oit_db", "t")]
+    assert [(o["id"], o["status"]) for o in mutating(rep)] == [(grant_id("oit_p", "oit_db", "t"), "succeeded")]
+    assert grants_of("oit_r") == ["GRANT SELECT ON oit_db.* TO oit_r"]
+    assert mutating(run(path, "apply")) == []
+
+
+def test_readonly_profile_login_can_plan(cfg):
+    """Ein Login mit readonly=1 im Profil lehnt jedes Setzen von readonly ab (Code 164)."""
+    root("CREATE SETTINGS PROFILE OR REPLACE oit_prof SETTINGS readonly = 1")
+    try:
+        root("CREATE USER oit_ro IDENTIFIED WITH sha256_password BY 'oit-ro-pw-123' SETTINGS PROFILE 'oit_prof'",
+             secret=True)
+        root("GRANT SHOW USERS, SHOW ROLES ON *.* TO oit_ro")
+        root("GRANT SELECT ON system.* TO oit_ro")
+        with CH.connect({"endpoint": {**ENDPOINT, "user": "oit_ro"}}, Secret("oit-ro-pw-123"), write=False) as s:
+            assert s.guard is False
+            assert {CH.discover(s, k, None).status for k in CH.kinds} == {"complete"}
+        assert can_login("oit_ro", "oit-ro-pw-123") is True
+        with CH.connect({"endpoint": ENDPOINT}, Secret(ADMIN_PW), write=False) as s:
+            assert s.guard is True  # normaler Login: readonly=2 wird weiter gesendet
+    finally:
+        root("DROP USER IF EXISTS oit_ro")
+        root("DROP SETTINGS PROFILE IF EXISTS oit_prof")
+
+
+def test_host_ip_is_normalized(cfg):
+    path = cfg(user("oit_u", hostIp=["10.0.0.1/8", "10.9.0.2/32", "2001:DB8::1/64", "10.0.0.0/8"]))
+    assert [o["status"] for o in mutating(run(path, "apply"))] == ["succeeded"]
+    assert sorted(root("SELECT host_ip FROM system.users WHERE name = 'oit_u' FORMAT JSON")[0]["host_ip"]) == \
+        ["10.0.0.0/8", "10.9.0.2", "2001:db8::/64"]
+    assert mutating(run(path, "apply")) == []
+    assert CH.validate({"kind": "DatabaseUser", "spec": {"hostIp": ["::ffff:127.0.0.1"]}})  # wird HOST LOCAL
+
+
+def test_set_password_refuses_multiple_auth_methods(cfg):
+    """ALTER USER … IDENTIFIED ersetzt alle Authentifizierungsmethoden; Ordivus verweigert das."""
+    root("CREATE USER oit_pw IDENTIFIED WITH sha256_password BY 'old-a-123', plaintext_password BY 'old-b-123'",
+         secret=True)
+    path = cfg(user("oit_pw", password=True), secrets={"oit_pw": "new-password-0123456789"})
+    op = mutating(run(path, "apply"))[0]
+    assert (op["action"], op["status"]) == ("SET_PASSWORD", "failed")
+    assert can_login("oit_pw", "old-a-123") is True and can_login("oit_pw", "old-b-123") is True

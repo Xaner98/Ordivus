@@ -1,0 +1,102 @@
+# RabbitMQ: one vhost per team, a publishing service and a read-only consumer.
+# Admin password and user passwords are stored as files in /var/run/ordivus/secrets.
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: files
+spec:
+  type: file
+  directory: /var/run/ordivus/secrets
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: rabbitmq-admin
+spec:
+  providerRef: files
+  path: rabbitmq-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: orders-publisher-password
+spec:
+  providerRef: files
+  path: orders-publisher
+  lifecycle:
+    generator:
+      length: 32
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: orders-reader-password
+spec:
+  providerRef: files
+  path: orders-reader
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: events-rabbitmq
+spec:
+  adapter: rabbitmq
+  endpoint:
+    host: rabbitmq.messaging.svc.cluster.local
+    port: 15671
+    tls:
+      caFile: /trust/ca.pem
+  username: ordivus
+  authentication:
+    credentialRef: rabbitmq-admin
+  scope:
+    vhosts:
+      include: ["orders", "billing"]
+    users:
+      include: ["orders-*", "billing-*"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: events-rabbitmq-policy
+spec:
+  targetRef: events-rabbitmq
+  mode: additive
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: VirtualHost
+metadata:
+  name: orders
+spec:
+  targetRef: events-rabbitmq
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: MessagingUser
+metadata:
+  name: orders-publisher
+spec:
+  targetRef: events-rabbitmq
+  tags: []
+  permissions:
+    orders:
+      configure: "^$"
+      write: "^orders\\."
+      read: "^$"
+  credentials:
+    credentialRef: orders-publisher-password
+    passwordPolicy: verify
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: MessagingUser
+metadata:
+  name: orders-reader
+spec:
+  targetRef: events-rabbitmq
+  tags: [management]
+  permissions:
+    orders:
+      configure: "^orders-reader\\."
+      write: "^orders-reader\\."
+      read: ".*"
+  credentials:
+    credentialRef: orders-reader-password

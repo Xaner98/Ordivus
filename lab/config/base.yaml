@@ -1,0 +1,41 @@
+# Statischer Teil der Lab-Konfiguration. Die Ressourcen pro Datenbank erzeugt scripts/lab.sh (resources.yaml),
+# den CredentialProvider "openbao" liefert je Modus auth-readonly.yaml bzw. auth-apply.yaml.
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata: {name: postgres-admin}
+spec: {providerRef: openbao, path: lab/admin/postgres}
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata: {name: lab-postgres}
+spec:
+  adapter: postgresql
+  endpoint:
+    host: postgres.ordivus-lab.svc.cluster.local
+    user: ordivus_admin
+    tls: {mode: disable}
+  authentication: {credentialRef: postgres-admin}
+  scope:
+    databases: {include: ["lab_*"]}
+    roles: {include: ["lab_*"]}
+---
+# Policy-Token des openbao-Adapters: je Modus ein eigenes Kubernetes Secret (credentials.readOnly/apply).
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata: {name: mounted}
+spec: {type: file, directory: /var/run/secrets/ordivus}
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata: {name: openbao-policy-token}
+spec: {providerRef: mounted, path: openbao-policy-token}
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata: {name: lab-openbao}
+spec:
+  adapter: openbao
+  endpoint: {url: "https://openbao.ordivus-lab.svc:8200"}
+  tls: {caFile: /etc/ordivus-lab/ca.crt}
+  protectedPolicies: [lab-kv-readonly, lab-kv-apply, lab-policy-reader, lab-policy-admin]
+  authentication: {credentialRef: openbao-policy-token}

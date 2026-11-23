@@ -1,4 +1,10 @@
-"""Adapter contract (SDK API 1). Adapter authors only need this file.
+"""Adapter contract (SDK API 1). Adapter authors only need this file (plus optional helpers in
+``ordivus.adapters.common`` and ``ordivus.net``).
+
+Contract version: ``API_VERSION`` is the contract this engine implements. Every adapter class must
+set ``api_version = API_VERSION`` explicitly; the registry skips (with a warning) classes that do
+not set it or were built for another contract version. The number changes only on incompatible
+contract changes.
 
 An adapter translates between Ordivus resources and one kind of target system. The engine
 owns everything else: config loading, diffing, policies, ordering, credentials, reports.
@@ -9,7 +15,8 @@ Lifecycle per run and target:
 2. ``desired(doc)`` for each resource doc: normalize into a ``Resource``; then
    ``validate_target(target, resources)`` once with all desired resources of the target.
 3. ``insecure_transport(target)`` before connecting; then ``connect(target, secret, write)``;
-   in apply additionally ``lock(session)``.
+   in apply additionally ``lock(session)``. Right after connect the engine calls
+   ``server_version(session)`` once and reports the result as ``serverVersion`` of the target.
 4. ``discover(session, kind, scope)`` once per kind in ``kinds``.
 5. Planning: ``check(session, resource, allow_privileged)`` per desired resource,
    ``dependencies(resource)`` for ordering, ``verify_password`` where a resource carries
@@ -26,12 +33,18 @@ Rules every adapter must keep:
   Any other exception is treated as an internal bug (reported as target error, the run continues).
 - Import optional drivers lazily (inside ``connect``) so a missing extra does not break
   loading of other adapters.
+- Read the server version during ``connect`` and raise
+  ``PermanentError("<system> <version> is not supported (minimum X)")`` for versions below the
+  supported minimum, before any discovery. Return it from ``server_version``. Document the
+  supported and tested version range in the adapter doc (``docs/adapters/<id>.md``).
 - Register the class under the entry point group ``ordivus.adapters`` in ``pyproject.toml``.
 """
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
+
+API_VERSION = 1  # adapter contract version implemented by this engine
 
 # Operation actions. Mutating ones are passed to Adapter.apply; the rest are report-only.
 CREATE, UPDATE, DELETE, SET_PASSWORD = "CREATE", "UPDATE", "DELETE", "SET_PASSWORD"
@@ -142,9 +155,11 @@ class Op:
 
 
 class Adapter:
-    """Base class for adapters. Subclasses set ``id`` and ``kinds`` and implement the methods."""
+    """Base class for adapters. Subclasses set ``id``, ``kinds`` and ``api_version`` and implement the methods."""
 
     id: ClassVar[str]
+    # Must be set to API_VERSION by every subclass; None (inherited) means "built without contract version".
+    api_version: ClassVar[int | None] = None
     # Primary execution order: creates/updates run in this order, deletes in reverse (e.g. Database,
     # DatabaseRole, DatabaseUser, Grant). ``dependencies`` refines it per resource.
     kinds: ClassVar[tuple[str, ...]]
@@ -203,6 +218,11 @@ class Adapter:
         """
         raise NotImplementedError
         yield
+
+    def server_version(self, session) -> str | None:
+        """Product and version of the connected server as read during ``connect``, e.g.
+        ``"PostgreSQL 16.4"``; reported as ``serverVersion``. None = unknown (default)."""
+        return None
 
     def discover(self, session, kind: str, scope: dict | None) -> Discovery:
         """List all objects of ``kind``. ``scope`` is the Target's ``spec.scope`` (adapter-defined

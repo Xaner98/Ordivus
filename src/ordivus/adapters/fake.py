@@ -33,6 +33,7 @@ class FakeSession:
 
 class FakeAdapter(Adapter):
     id = "fake"
+    api_version = 1
     kinds = ("FakeItem", "FakeUser")
     password_kinds = ("FakeUser",)
 

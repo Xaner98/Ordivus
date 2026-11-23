@@ -229,3 +229,34 @@ def test_privileged_and_out_of_scope_databases(p, cfg, tmp_path):
     assert users()["root"] == before
     assert adapter.validate({"kind": "Target", "metadata": {"name": "t"},
                              "spec": {"endpoint": {"host": "evil@host/x"}}})
+
+
+def test_update_keeps_out_of_scope_and_wildcard_access(p, cfg):
+    """Regression: PUT ersetzt die ganze Zuordnung; Einträge außerhalb des Scopes und '*' bleiben erhalten."""
+    name, inside = f"{p}scoped", f"{p}in"
+    granted = {inside: ["readonly"], "elsewhere": ["crud"], "*": ["readonly"]}
+    root("POST", "/api/v1/server/users", {"name": name, "password": "password-123", "databases": granted})
+    scoped = {"databases": {"include": [f"{p}*"]}, "users": {"include": [f"{p}*"]}}
+    adapter = ArcadeDBAdapter()
+    with adapter.connect({**TARGET, "scope": scoped}, Secret(ROOT_PW), write=False) as session:
+        observed = {r.id: r for r in adapter.discover(session, "DatabaseUser", scoped).resources}
+    assert observed[name].attrs == {"databases": {inside: ["readonly"]}}
+
+    path = cfg(*user(name, "pw", databases={inside: ["crud"]}))
+    target = json.loads((path / "00.json").read_text())
+    target["spec"]["scope"] = scoped
+    (path / "00.json").write_text(json.dumps(target))
+    rep = run(path, "apply")
+    assert ("DatabaseUser", name, "UPDATE") in actions(rep)
+    assert users()[name] == {inside: ["crud"], "elsewhere": ["crud"], "*": ["readonly"]}
+    assert not [o for o in run(path, "apply")["operations"] if o["action"] in MUTATING]
+
+
+def test_server_version(p):
+    adapter = ArcadeDBAdapter()
+    with adapter.connect(TARGET, Secret(ROOT_PW), write=False) as session:
+        assert adapter.server_version(session).startswith("ArcadeDB 26.")
+    assert arcadedb._version({"version": "26.12.1-SNAPSHOT (build x)"}) == ("26.12.1-SNAPSHOT", (26, 12, 1))
+    assert arcadedb._version({"version": "26.2.1 (build x)"})[1] < arcadedb.MIN_VERSION
+    with pytest.raises(PermanentError, match="version"):
+        arcadedb._version({"version": "unknown"})

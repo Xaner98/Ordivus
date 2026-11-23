@@ -1,0 +1,122 @@
+# Keycloak: realm "shop" with roles, a group and two clients, managed by a dedicated service account
+# (client "ordivus" in realm "shop" with realm-management roles, see docs/adapters/keycloak.md).
+# Client secrets are stored as files in /var/run/ordivus/secrets.
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: files
+spec:
+  type: file
+  directory: /var/run/ordivus/secrets
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: keycloak-ordivus
+spec:
+  providerRef: files
+  path: keycloak-ordivus           # client secret of the Ordivus service account
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: shop-backend-secret
+spec:
+  providerRef: files
+  path: shop-backend
+  lifecycle:
+    generator:
+      length: 40
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: shop-keycloak
+spec:
+  adapter: keycloak
+  endpoint:
+    host: keycloak.iam.svc.cluster.local
+    port: 8443
+    tls:
+      caFile: /trust/ca.pem
+  login:
+    realm: shop
+    clientId: ordivus              # client credentials (service account)
+  authentication:
+    credentialRef: keycloak-ordivus
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: shop-keycloak-policy
+spec:
+  targetRef: shop-keycloak
+  mode: additive
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KeycloakRealm
+metadata:
+  name: shop
+spec:
+  targetRef: shop-keycloak
+  displayName: Shop
+  resetPasswordAllowed: true
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KeycloakRealmRole
+metadata:
+  name: shop-viewer
+spec:
+  targetRef: shop-keycloak
+  realm: shop
+  name: viewer
+  description: Read access to the shop
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KeycloakRealmRole
+metadata:
+  name: shop-editor
+spec:
+  targetRef: shop-keycloak
+  realm: shop
+  name: editor
+  composites: [viewer]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KeycloakGroup
+metadata:
+  name: shop-editors
+spec:
+  targetRef: shop-keycloak
+  realm: shop
+  name: editors
+  realmRoles: [editor]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KeycloakClient
+metadata:
+  name: shop-frontend
+spec:
+  targetRef: shop-keycloak
+  realm: shop
+  clientId: shop-frontend
+  publicClient: true
+  standardFlowEnabled: true
+  directAccessGrantsEnabled: false
+  redirectUris: ["https://shop.example.com/*"]
+  webOrigins: ["https://shop.example.com"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: KeycloakClient
+metadata:
+  name: shop-backend
+spec:
+  targetRef: shop-keycloak
+  realm: shop
+  clientId: shop-backend
+  publicClient: false
+  standardFlowEnabled: false
+  serviceAccountsEnabled: true
+  credentials:
+    credentialRef: shop-backend-secret
+    passwordPolicy: verify

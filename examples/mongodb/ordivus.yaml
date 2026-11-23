@@ -1,0 +1,82 @@
+# Example: shop database with a custom role and an application user.
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: shop-mongodb
+spec:
+  adapter: mongodb
+  endpoint:
+    host: mongodb-0.mongodb.data.svc.cluster.local
+    port: 27017
+    replicaSet: rs0
+    user: ordivus_admin
+    authDatabase: admin
+    tls:
+      caFile: /trust/ca.pem
+  authentication:
+    credentialRef: mongodb-admin
+  scope:
+    databases:
+      include: ["shop"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: local-secrets
+spec:
+  type: file
+  directory: /var/run/secrets/ordivus
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: mongodb-admin
+spec:
+  providerRef: local-secrets
+  path: mongodb-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: shop-app-password
+spec:
+  providerRef: local-secrets
+  path: shop-app
+  lifecycle:
+    generator:
+      length: 40
+      alphabet: alphanumeric-symbol-safe
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseRole
+metadata:
+  name: shop-orders-writer
+spec:
+  targetRef: shop-mongodb
+  database: shop
+  name: ordersWriter
+  privileges:
+    - resource: {db: shop, collection: orders}
+      actions: [find, insert, update]
+  roles: [read]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: shop-app
+spec:
+  targetRef: shop-mongodb
+  database: shop
+  name: shop_app
+  roles: [ordersWriter]
+  credentials:
+    credentialRef: shop-app-password
+    passwordPolicy: verify
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: shop-governance
+spec:
+  targetRef: shop-mongodb
+  mode: additive

@@ -10,12 +10,14 @@ bewusst getrennt.
 """
 
 import json
+import logging
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib.parse import quote
 
 from ordivus import openbao_http
+from ordivus.adapters import common
 from ordivus.adapters.base import (
     COMPLETE,
     CREATE,
@@ -29,6 +31,8 @@ from ordivus.adapters.base import (
 )
 
 KIND = "OpenBaoPolicy"
+MIN_VERSION = (2, 0)
+log = logging.getLogger("ordivus")
 SYSTEM_POLICIES = frozenset({"root", "default"})
 CAPABILITY = re.compile(r"^[a-z_]+$")
 # OpenBao trimmt und kleinschreibt Namen serverseitig (" Default" == "default"): nur die Normalform zulassen
@@ -109,6 +113,31 @@ def privileged(text: str) -> str | None:
     return None
 
 
+def _data(body: dict, what: str) -> dict:
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise PermanentError(f"{what}: unexpected response (no 'data' object)")
+    return data
+
+
+def server_version(status: dict) -> str | None:
+    """Produkt und Version aus ``sys/seal-status``; zu alte OpenBao-Versionen → PermanentError.
+
+    HashiCorp Vault (``build_date`` statt ``commit_date``) wird nur gemeldet: die genutzte API
+    (``sys/policies/acl``, ``auth/token/lookup-self``) ist dort gleich, aber ungetestet.
+    """
+    version = status.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    if "build_date" in status and "commit_date" not in status:
+        log.warning("target is HashiCorp Vault %s, not OpenBao: untested", version)
+        return f"Vault {version}"
+    m = re.match(r"v?(\d+)\.(\d+)", version)
+    if m and tuple(map(int, m.groups())) < MIN_VERSION:
+        raise PermanentError(f"OpenBao {version} is not supported (minimum {'.'.join(map(str, MIN_VERSION))})")
+    return f"OpenBao {version}"
+
+
 def render(rules: list[dict]) -> str:
     """HCL aus ``rules``: Pfade in deklarierter Reihenfolge, Capabilities sortiert und dedupliziert."""
     return "\n\n".join(
@@ -123,6 +152,7 @@ class Session:
     ctx: object
     write: bool
     protected: frozenset[str]
+    version: str | None = None
 
     def call(self, method, path, body=None, what=""):
         return openbao_http.check(*openbao_http.request(self.url, method, path, self.token, body, ctx=self.ctx),
@@ -131,6 +161,7 @@ class Session:
 
 class OpenBaoAdapter(Adapter):
     id = "openbao"
+    api_version = 1
     kinds = (KIND,)
 
     def validate(self, doc):
@@ -190,19 +221,35 @@ class OpenBaoAdapter(Adapter):
     def connect(self, target, secret, write):
         if secret is None:
             raise PermanentError("openbao target requires spec.authentication.credentialRef (admin token)")
-        session = Session(target["endpoint"]["url"], secret.reveal(), openbao_http.tls_context(target.get("tls")),
+        session = Session(target["endpoint"]["url"], secret.reveal(), common.tls_context(target.get("tls")),
                           write, frozenset())
-        me = session.call("GET", "auth/token/lookup-self", what="token lookup-self").get("data") or {}
-        own = set(me.get("policies") or []) | set(me.get("identity_policies") or [])
+        session.version = server_version(session.call("GET", "sys/seal-status", what="seal-status"))
+        me = _data(session.call("GET", "auth/token/lookup-self", what="token lookup-self"), "token lookup-self")
+        own = set()
+        for key in ("policies", "identity_policies"):
+            names = me.get(key) or []
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                raise PermanentError(f"token lookup-self: unexpected {key!r}")
+            own |= set(names)
         session.protected = frozenset(map(normalize, SYSTEM_POLICIES | set(target.get("protectedPolicies", [])) | own))
         yield session
 
+    def server_version(self, session):
+        return session.version
+
     def discover(self, session, kind, scope):
-        names = session.call("GET", "sys/policies/acl?list=true", what="list acl policies")["data"]["keys"]
+        what = "list acl policies"
+        names = _data(session.call("GET", "sys/policies/acl?list=true", what=what), what).get("keys")
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise PermanentError(f"{what}: unexpected response (no 'keys' list)")
         resources = []
         for name in sorted(names):
-            data = session.call("GET", f"sys/policies/acl/{quote(name, safe='')}", what=f"read policy {name!r}")
-            resources.append(Resource(KIND, name, {"policy": canonical(data["data"].get("policy") or "")},
+            what = f"read policy {name!r}"
+            policy = _data(session.call("GET", f"sys/policies/acl/{quote(name, safe='')}", what=what), what).get(
+                "policy") or ""
+            if not isinstance(policy, str):
+                raise PermanentError(f"{what}: unexpected response ('policy' is not text)")
+            resources.append(Resource(KIND, name, {"policy": canonical(policy)},
                                       system=normalize(name) in session.protected))
         return Discovery(COMPLETE, resources)
 

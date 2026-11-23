@@ -550,6 +550,8 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy)
         secret = _read(model.credentials[target.auth], model.known) if target.auth else None
         with target.adapter.connect(target.spec, secret, write) as session, \
                 (target.adapter.lock(session) if write else nullcontext()):
+            if (server := target.adapter.server_version(session)) is not None:
+                info["serverVersion"] = server
             found = {kind: _discover(target, session, kind) for kind in target.adapter.kinds}
             info["inventory"] = {k: {"status": d.status, "count": len(d.resources), **({"reason": d.reason}
                                  if d.reason else {})} for k, d in found.items()}

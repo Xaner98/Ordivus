@@ -9,7 +9,7 @@ docker build -t ordivus:dev .
 docker run --rm --read-only ordivus:dev --version
 ```
 
-The image contains the engine and the drivers for PostgreSQL, MySQL and Redis (ClickHouse, ArcadeDB and OpenBao need no extras). It runs as UID/GID `10001`, writes nothing to the root file system (`readOnlyRootFilesystem`) and contains neither configuration nor credentials, nor pip/setuptools. The base image is pinned by digest in the `Dockerfile`, Python dependencies come hash-verified from `requirements.lock`, and Debian security updates are applied during the build (maintenance: [development.md](development.md#dependencies-and-lock-file)). OCI labels are set via `--build-arg VERSION=…` and `--build-arg REVISION=$(git rev-parse HEAD)`.
+The image contains the engine and all adapters with their client libraries. It runs as UID/GID `10001`, writes nothing to the root file system (`readOnlyRootFilesystem`) and contains neither configuration nor credentials, nor pip/setuptools. The base image is pinned by digest in the `Dockerfile`, Python dependencies come hash-verified from `requirements.lock`, and Debian security updates are applied during the build (maintenance: [development.md](development.md#dependencies-and-lock-file)). OCI labels are set via `--build-arg VERSION=…` and `--build-arg REVISION=$(git rev-parse HEAD)`.
 
 ## Installation
 

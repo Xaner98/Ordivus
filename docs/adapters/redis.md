@@ -1,6 +1,6 @@
 # Redis adapter
 
-Manages **ACL users** in Redis 7 and newer (tested with Redis 8) as kind `DatabaseUser`.
+Manages **ACL users** in Redis 7.0 and newer and Valkey as kind `DatabaseUser`.
 Installation: `pip install 'ordivus[redis]'` (redis-py ≥ 5).
 
 ## Target
@@ -159,13 +159,13 @@ command, keeping it does not block. Undeclared admin users stay
 The admin user needs at least:
 
 ```
-+ping +acl|users +acl|getuser            # plan/drift
++ping +info +acl|users +acl|getuser      # plan/drift
 +acl|setuser +acl|deluser                # apply
-+config|get +info +acl|save              # persist: aclSave
-+info +config|rewrite                    # persist: configRewrite
++config|get +acl|save                    # persist: aclSave
++config|get +config|rewrite              # persist: configRewrite
 ```
 
-For `plan`/`drift`, a user with the first three permissions is sufficient. Independently of that, the
+For `plan`/`drift`, a user with the first four permissions is sufficient. Independently of that, the
 adapter refuses every change over a read-only session.
 
 ## Persistence
@@ -178,10 +178,12 @@ the changes are gone unless they are saved. `spec.persist` controls what Ordivus
 |---|---|---|
 | `none` (default) | nothing; persistence is up to the operator | – |
 | `aclSave` | `ACL SAVE` | server configured with `aclfile` |
-| `configRewrite` | `CONFIG REWRITE` (users end up in `redis.conf`) | server with a configuration file, without `aclfile` |
+| `configRewrite` | `CONFIG REWRITE` (users end up in `redis.conf`) | server with a configuration file, **without** `aclfile` |
 
 The prerequisite is checked during `apply` before the first change; if it is missing, the run aborts for
-this target without changing anything. `plan`/`drift` do not check it.
+this target without changing anything. `plan`/`drift` do not check it. With `aclfile` configured,
+`CONFIG REWRITE` does not write users at all (they would be lost on restart while `apply` reports success),
+so `configRewrite` is rejected there with a hint to use `aclSave`.
 
 If Redis is started from an ACL file or `redis.conf` that Ordivus does not write (e.g. a
 ConfigMap in Kubernetes), the next restart overwrites the changes. In that case you must maintain the source
@@ -198,6 +200,19 @@ itself; Ordivus reports the deviation on the next `drift`.
 - Without `tls` the connection counts as insecure (warning, `insecureTransport: true`; with operator policy
   `requireTls: true` abort, exit code 11).
 
-## Valkey
+## Supported versions
 
-Valkey 7.2+/8 offers the same ACL commands and should work, but is **untested**.
+The server version is read with `INFO server` at connect and reported as `serverVersion`
+(`Redis 8.0.2`, `Valkey 8.1.0`; Valkey is detected by `server_name:valkey`).
+
+| Server | Status |
+|---|---|
+| Redis 8.x | tested (integration tests) |
+| Redis 7.0 | checked manually (7.0.15) |
+| Valkey 8.x | checked manually (8.1) |
+| Redis < 7.0 | rejected at connect: `Redis 6.2.24 is not supported (minimum Redis 7.0)` (exit code 13) |
+
+The minimum is Redis 7.0 because the adapter relies on its ACL model (selectors, `ACL GETUSER`
+returning keys/channels as rule strings). Valkey reports a Redis-compatible `redis_version`
+(7.2.4), which is used for the minimum check. redis-py 5 to 8 is supported; `ACL GETUSER` is parsed
+the same for RESP2 (flat list) and RESP3 (map) replies.

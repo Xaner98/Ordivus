@@ -75,8 +75,13 @@ Comparison semantics:
 - `databases` missing → the assignment is not managed (neither read nor reset).
 - `databases: {}` → the user should not be assigned to any database.
 - Group lists are sorted and deduplicated; order is irrelevant.
-- `databases` is compared as a whole and, on deviation, replaced completely via `PUT /api/v1/server/users`
-  (ArcadeDB does not support partial changes to the assignment).
+- Only entries for databases in `spec.scope.databases` are read and compared; entries for databases
+  outside the scope and the `*` entry (all databases) are neither reported nor changed.
+- On deviation, the assignment is written with `PUT /api/v1/server/users`. ArcadeDB replaces the whole
+  map there, so Ordivus re-reads the user right before the `PUT` and carries over the entries it does
+  not manage (out of scope, `*`). A change made by someone else between that read and the `PUT` can be lost.
+- Caution: a `*` entry still grants access to every database even if `databases` in the config does not
+  list it; remove it outside Ordivus if it is not wanted.
 - User names may contain any printable characters (including quotes, brackets,
   spaces), but must not start with `apitoken:`. Names are only transmitted as a JSON value or
   URL-encoded query parameter.
@@ -139,7 +144,10 @@ as success after re-reading; deleting a user that does not exist (any more) (404
 - Users are **server-wide**, not per database; `scope.users` filters by name only.
 - Groups (`server-groups.json`) and API tokens are not managed; non-existent group
   or database names in `databases` are accepted by ArcadeDB without error.
-- Requires an ArcadeDB version with `/api/v1/server/users` (tested with 26.12); older versions
-  return 404 there → discovery error (`unknown`), no changes.
+- Supported versions: **ArcadeDB 26.3 and newer** (the first release with `/api/v1/server/users`;
+  26.2 and older answer 404 there). The version is read from `GET /api/v1/server?mode=basic` at connect and
+  reported as `serverVersion` (e.g. `ArcadeDB 26.12.1-SNAPSHOT`); older versions are rejected before any
+  discovery (`ArcadeDB 26.2.1 is not supported (minimum 26.3)`, exit code 13). Tested with 26.12
+  (integration tests); 26.3, 26.4, 26.6 and 26.11 checked manually.
 - No locking (`lock`): parallel runs against the same instance are not protected against each other.
 - HA cluster: ArcadeDB replicates changes itself; not tested separately.

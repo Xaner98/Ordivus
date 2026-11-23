@@ -1,0 +1,10 @@
+# KV-Provider mit Kubernetes-Auth als ordivus-apply (projiziertes Token, Audience openbao).
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata: {name: openbao}
+spec:
+  type: openbao-kv-v2
+  endpoint: "https://openbao.ordivus-lab.svc:8200"
+  mount: secret
+  tls: {caFile: /etc/ordivus-lab/ca.crt}
+  auth: {method: kubernetes, role: ordivus-apply, jwtFile: /var/run/secrets/tokens/token}

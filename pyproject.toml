@@ -15,7 +15,10 @@ dependencies = ["PyYAML>=6.0,<7"]
 postgresql = ["psycopg[binary]>=3.2,<4"]
 mysql = ["PyMySQL>=1.1,<2"]
 redis = ["redis>=5.0,<9"]
-# clickhouse, arcadedb, openbao: HTTP via standard library, no extra needed
+mariadb = ["PyMySQL>=1.1,<2"]
+mongodb = ["pymongo>=4.10,<5"]
+kafka = ["kafka-python>=3.0,<4"]
+# clickhouse, arcadedb, openbao, rabbitmq, keycloak, grafana: HTTP via standard library, no extra needed
 dev = ["pytest>=8,<10", "ruff>=0.6,<1"]
 
 [project.scripts]
@@ -30,6 +33,12 @@ clickhouse = "ordivus.adapters.clickhouse:ClickHouseAdapter"
 arcadedb = "ordivus.adapters.arcadedb:ArcadeDBAdapter"
 redis = "ordivus.adapters.redis:RedisAdapter"
 openbao = "ordivus.adapters.openbao:OpenBaoAdapter"
+mariadb = "ordivus.adapters.mariadb:MariaDBAdapter"
+mongodb = "ordivus.adapters.mongodb:MongoDBAdapter"
+rabbitmq = "ordivus.adapters.rabbitmq:RabbitMQAdapter"
+keycloak = "ordivus.adapters.keycloak:KeycloakAdapter"
+kafka = "ordivus.adapters.kafka:KafkaAdapter"
+grafana = "ordivus.adapters.grafana:GrafanaAdapter"
 
 [tool.setuptools.packages.find]
 where = ["src"]

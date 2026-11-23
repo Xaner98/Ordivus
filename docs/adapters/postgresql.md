@@ -1,7 +1,12 @@
 # PostgreSQL adapter
 
-Manages roles, users, databases and a robust subset of grants in PostgreSQL
-(tested with PostgreSQL 17). Installation: `pip install 'ordivus[postgresql]'` (psycopg ≥ 3.2).
+Manages roles, users, databases and a robust subset of grants in PostgreSQL.
+Installation: `pip install 'ordivus[postgresql]'` (psycopg ≥ 3.2).
+
+**Supported versions:** PostgreSQL 13 and later; tested with PostgreSQL 17. Ordivus reads the
+server version when connecting and refuses older servers before discovery
+(`PostgreSQL 12.5 is not supported (minimum PostgreSQL 13)`, exit code 13). The version appears as
+`serverVersion` of the target in the report.
 
 Kinds in execution order: `DatabaseRole`, `DatabaseUser`, `Database`, `Grant`. Deletions
 run in reverse (grants, then databases, then users and roles). Roles come before databases
@@ -174,7 +179,7 @@ spec:
 |---|---|---|
 | `database` | the database `database` | `CONNECT`, `CREATE`, `TEMPORARY` (`TEMP`) |
 | `schema` | schema `schema` in `database` | `CREATE`, `USAGE` |
-| `tables-in-schema` | all tables, views, materialized views, foreign tables in `schema` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN` (PG 17+) |
+| `tables-in-schema` | all tables, views, materialized views, foreign tables in `schema` | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN` (PG 17+; `BLOCKED` on older servers) |
 
 Semantics:
 
@@ -182,8 +187,11 @@ Semantics:
   missing privileges and revokes undeclared privileges on this object. Case-insensitive.
 - `tables-in-schema`: a privilege counts as present if the recipient has it on **every** table in the
   schema (as the owner of a table, it counts as authorized there). New tables created after the run
-  show up as drift on the next run; `ALTER DEFAULT PRIVILEGES` is not managed.
-- `DELETE` of a grant revokes `ALL PRIVILEGES` on the object.
+  show up as drift on the next run; `ALTER DEFAULT PRIVILEGES` is not managed. A recipient that holds
+  privileges only on some tables of a schema (single-table grants) has no `tables-in-schema` grant
+  there: it is neither reported nor ever deleted.
+- `DELETE` of a grant revokes exactly the observed privileges on the object (for `tables-in-schema`:
+  those held on every table); single-table grants of other privileges stay.
 - Not supported: `ALL`, `WITH GRANT OPTION`, grants to `PUBLIC`, column, sequence, function
   and single-table grants, default privileges.
 - Grants on system schemas (`pg_catalog`, `information_schema`, all `pg_*`) are a

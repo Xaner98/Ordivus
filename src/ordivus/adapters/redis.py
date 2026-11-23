@@ -1,4 +1,4 @@
-"""Redis-Adapter: ACL-Benutzer als ``DatabaseUser`` (Redis 7+/8, Valkey ungetestet).
+"""Redis-Adapter: ACL-Benutzer als ``DatabaseUser`` (Redis ab 7.0, Valkey 8).
 
 Target-Spec::
 
@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 
+from ordivus.adapters import common
 from ordivus.adapters.base import (
     COMPLETE,
     CREATE,
@@ -42,6 +43,7 @@ USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}")
 COMMAND = re.compile(r"[+-](@[a-z0-9_-]+|[a-z0-9_.-]+(\|[a-z0-9_.-]+)?)")
 ALIASES = {"allcommands": "+@all", "nocommands": "-@all"}
 KEY_PREFIX = re.compile(r"%(R|W|RW)~")
+MIN_VERSION = (7, 0)  # ACL-Selektoren und GETUSER-Format (keys/channels als Regel-String) ab Redis 7.0
 PRIVILEGED_CATEGORIES = ("admin", "dangerous")  # allowPrivilegedGrants: jeder Befehl daraus ist privilegiert
 
 
@@ -134,6 +136,29 @@ class RedisSession:
     protected: frozenset
     persist: str
     categories: dict = dc_field(default_factory=dict)  # ACL CAT je Kategorie, pro Session gecacht
+    version: str | None = None
+
+
+def _pairs(reply):
+    """RESP2 liefert Maps als flache Liste ``[key, value, ...]``, RESP3 als dict (je nach redis-py-Version)."""
+    return dict(zip(reply[::2], reply[1::2], strict=True)) if isinstance(reply, list) else reply
+
+
+def _getuser(client, name: str) -> dict | None:
+    info = _pairs(client.execute_command("ACL", "GETUSER", name))
+    if info is not None and info.get("selectors"):
+        info["selectors"] = [_pairs(sel) for sel in info["selectors"]]
+    return info
+
+
+def _server_version(info: dict) -> tuple[str, tuple]:
+    """``INFO server`` → (``"Redis 8.0.2"``/``"Valkey 8.1.0"``, Redis-kompatible Version als Tupel)."""
+    compat = re.match(r"(\d+)\.(\d+)", str(info.get("redis_version", "")))  # Valkey meldet 7.2.4
+    if info.get("server_name") == "valkey":
+        shown = f"Valkey {info.get('valkey_version', info.get('redis_version'))}"
+    else:
+        shown = f"Redis {info.get('redis_version')}"
+    return shown, tuple(int(x) for x in compat.groups()) if compat else (0, 0)
 
 
 def _error(e: Exception, secret: Secret | None = None) -> Exception:
@@ -157,6 +182,7 @@ def _endpoint(target: dict) -> tuple:
 
 class RedisAdapter(Adapter):
     id = "redis"
+    api_version = 1
     kinds = (KIND,)
     password_kinds = (KIND,)
 
@@ -167,18 +193,7 @@ class RedisAdapter(Adapter):
             ep = spec.get("endpoint")
             if not isinstance(ep, dict):
                 return [*errors, "spec.endpoint must be a mapping"]
-            errors += [f"unknown field spec.endpoint.{k}" for k in ep if k not in {"host", "port", "tls"}]
-            if not isinstance(ep.get("host"), str) or not ep.get("host"):
-                errors.append("spec.endpoint.host must be a non-empty string")
-            if "port" in ep and (type(ep["port"]) is not int or not 0 < ep["port"] < 65536):
-                errors.append("spec.endpoint.port must be an integer 1-65535")
-            tls = ep.get("tls", {})
-            if not isinstance(tls, dict):
-                errors.append("spec.endpoint.tls must be a mapping")
-            else:
-                errors += [f"unknown field spec.endpoint.tls.{k}" for k in tls if k != "caFile"]
-                if not isinstance(tls.get("caFile", ""), str):
-                    errors.append("spec.endpoint.tls.caFile must be a string")
+            errors += common.validate_endpoint(ep)
             if not isinstance(spec.get("username", "default"), str) or not spec.get("username", "default"):
                 errors.append("spec.username must be a non-empty string")
             if spec.get("persist", "none") not in PERSIST:
@@ -228,16 +243,27 @@ class RedisAdapter(Adapter):
         persist = target.get("persist", "none")
         try:
             client.ping()
+            info = client.info("server")
+            version, compat = _server_version(info)
+            if compat < MIN_VERSION:
+                raise PermanentError(f"{version} is not supported (minimum Redis 7.0)")
             if write and persist != "none":  # vor jeder Änderung prüfen, ob Persistenz überhaupt geht
-                if persist == "aclSave" and not client.config_get("aclfile").get("aclfile"):
+                aclfile = client.config_get("aclfile").get("aclfile")
+                if persist == "aclSave" and not aclfile:
                     raise PermanentError("persist aclSave requires 'aclfile' to be configured on the server")
-                if persist == "configRewrite" and not client.info("server").get("config_file"):
+                if persist == "configRewrite" and not info.get("config_file"):
                     raise PermanentError("persist configRewrite requires the server to run with a config file")
-            yield RedisSession(client, write, frozenset({"default", username}), persist)
+                if persist == "configRewrite" and aclfile:  # CONFIG REWRITE schreibt Benutzer dann nicht mit
+                    raise PermanentError("persist configRewrite does not persist users when 'aclfile' is "
+                                         "configured on the server; use persist: aclSave")
+            yield RedisSession(client, write, frozenset({"default", username}), persist, version=version)
         except redis.exceptions.RedisError as e:
             raise _error(e, secret) from None
         finally:
             client.close()
+
+    def server_version(self, session):
+        return session.version
 
     def _category(self, session, name: str) -> frozenset:
         if name not in session.categories:
@@ -260,7 +286,7 @@ class RedisAdapter(Adapter):
         try:
             added = self._privileged(session, resource.attrs["commands"])
             if added:  # nur neu hinzukommende Rechte sperren; bestehende bleiben unangetastet erlaubt
-                info = session.client.execute_command("ACL", "GETUSER", resource.id)
+                info = _getuser(session.client, resource.id)
                 if info is not None:
                     added -= self._privileged(session, _commands(info["commands"].split()))
         except redis.exceptions.RedisError as e:
@@ -277,7 +303,7 @@ class RedisAdapter(Adapter):
         resources = []
         try:
             for name in session.client.acl_users():
-                info = session.client.execute_command("ACL", "GETUSER", name)
+                info = _getuser(session.client, name)
                 if info is None:  # zwischen USERS und GETUSER gelöscht
                     continue
                 attrs = {
@@ -327,7 +353,7 @@ class RedisAdapter(Adapter):
         import redis
 
         try:
-            info = session.client.execute_command("ACL", "GETUSER", resource.id)
+            info = _getuser(session.client, resource.id)
         except redis.exceptions.RedisError as e:
             raise _error(e) from None
         if info is None:
