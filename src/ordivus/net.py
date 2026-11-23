@@ -4,6 +4,7 @@ Folgt nie Redirects: urllib schickte sonst ``X-Vault-Token``/``Authorization`` a
 auch an fremde Hosts und von https auf http. Nur http/https; Antwortkörper sind auf ``MAX_BODY`` begrenzt.
 """
 
+import logging
 import ssl
 import urllib.request
 from urllib.parse import urlsplit
@@ -12,6 +13,8 @@ from ordivus.adapters.base import PermanentError
 
 MAX_BODY = 16 * 1024 * 1024
 SCHEMES = ("http", "https")
+log = logging.getLogger("ordivus")
+_warned: set[str] = set()  # eine Warnung je Ziel und Prozess
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -22,8 +25,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def urlopen(req: urllib.request.Request, timeout: float, context: ssl.SSLContext | None = None):
     """Wie ``urllib.request.urlopen``, aber ohne Redirects und nur für http/https."""
-    if urlsplit(req.full_url).scheme not in SCHEMES:
+    url = urlsplit(req.full_url)
+    if url.scheme not in SCHEMES:
         raise PermanentError("only http and https URLs are supported")
+    # HTTP(S)_PROXY/NO_PROXY gelten (ProxyHandler); sichtbar machen, denn der Proxy sieht Klartext bzw. Ziele
+    proxy = urllib.request.getproxies().get(url.scheme)
+    if proxy and not urllib.request.proxy_bypass(url.hostname or "") and url.netloc not in _warned:
+        _warned.add(url.netloc)
+        log.warning("%s://%s is reached via proxy %s (from %s_PROXY; exclude with NO_PROXY)",
+                    url.scheme, url.netloc, urlsplit(proxy).hostname, url.scheme.upper())
     opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=context))
     return opener.open(req, timeout=timeout)
 

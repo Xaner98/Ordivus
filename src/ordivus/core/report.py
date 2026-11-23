@@ -41,16 +41,19 @@ def _op(op: Op) -> dict:
     return {**out, "reason": op.reason} if op.reason else out
 
 
-def target_status(mode: str, inventory: dict, ops: list[Op]) -> str:
+def target_status(mode: str, inventory: dict, ops: list[Op], authoritative: bool = False) -> str:
+    incomplete = any(i["status"] != "complete" for i in inventory.values())
     if mode == "apply":
         if any(o.status in ("failed", "unverified", "skipped") and o.action in ACTIONABLE for o in ops):
             return "partial"
         if any(o.action == UNKNOWN and o.desired is not None for o in ops):
             return "incomplete"  # deklarierte Ressource weder angelegt noch geprüft: nie "in_sync"
+        if authoritative and incomplete:
+            return "incomplete"  # nicht Deklariertes ist unbekannt: Authoritative-Zustand nicht belegt
         return "applied" if any(o.status == "succeeded" for o in ops) else "in_sync"
     if any(o.action in ACTIONABLE or o.action == BLOCKED for o in ops):
         return "drift_detected"
-    if any(i["status"] != "complete" for i in inventory.values()) or any(o.action == UNKNOWN for o in ops):
+    if incomplete or any(o.action == UNKNOWN for o in ops):
         return "incomplete"
     return "in_sync"
 

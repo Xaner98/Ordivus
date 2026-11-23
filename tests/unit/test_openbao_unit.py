@@ -123,3 +123,24 @@ def test_policy_validation():
         "spec.rules[0].capabilities must be a non-empty list of capability names"]
     assert a.validate({"kind": "Target", "metadata": {"name": "t"},
                        "spec": {"endpoint": {"url": "https://b"}, "protectedPolicies": ["break-glass"]}}) == []
+
+
+def test_policy_path_may_match_guarded_prefixes():
+    from ordivus.adapters.openbao import may_match, parse
+
+    for pattern in ("sys/", "sys/*", "sys/policies/acl", "*", "s*", "sy*", "sys*", "+/x", "+/*", "sys/+/x"):
+        assert may_match(pattern, "sys/"), pattern
+    for pattern in ("sys", "secret/sys/x", "system/x", "auth/sys/x", "+", "x*"):
+        assert not may_match(pattern, "sys/"), pattern
+    assert parse('path "a" { capabilities = ["read",] }') == [("a", ["read"])]
+    from ordivus.adapters.openbao import privileged
+
+    for p in ("renew-self", "revoke-self", "lookup-self"):
+        assert privileged(f'path "auth/token/{p}" {{ capabilities = ["read", "update"] }}') is None
+    for text in ('path "auth/token/*" { capabilities = ["update"] }',
+                 'path "auth/token/renew-self*" { capabilities = ["update"] }',
+                 'path "auth/token/renew-self" { capabilities = ["delete"] }'):
+        assert privileged(text), text
+    for text in ('path "a" { capabilities = ["read"] } junk', 'path "a" { capabilities = [read] }',
+                 'path "a" { capabilities = ["read"]\n policy = "write" }', 'path "a\\q" { capabilities = ["read"] }'):
+        assert parse(text) is None, text

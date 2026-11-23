@@ -82,6 +82,12 @@ def _db_pattern(raw: str) -> tuple[str, bool]:
     return "".join(t[-1] for t in tokens), any(t in ("_", "%") for t in tokens)
 
 
+def _system_pattern(raw: str) -> bool:
+    """Ob das ``mysql.db``-Muster (``%``/``_`` als Wildcards) eine Systemdatenbank trifft, z. B. ``m%``."""
+    rx = "".join(".*" if t == "%" else "." if t == "_" else re.escape(t[-1]) for t in re.findall(r"\\.|.", raw, re.S))
+    return any(re.fullmatch(rx, d, re.I | re.S) for d in SYSTEM_DATABASES)
+
+
 def _grant_resource(grantee: str, level: str, privs, db=None, table=None, **flags) -> Resource:
     attrs = {"grantee": grantee, "on": level, **({"database": db} if db is not None else {}),
              **({"table": table} if table is not None else {}), "privileges": _norm_privs(privs)}
@@ -160,7 +166,17 @@ class MySQLAdapter(Adapter):
     def _name_errors(value, where, limit) -> list[str]:
         if not isinstance(value, str) or not value or len(value) > limit or "\0" in value:
             return [f"{where} must be a non-empty string of at most {limit} characters"]
+        if value != value.strip():  # MySQL vergleicht Kontonamen mit PAD SPACE: "root " == "root"
+            return [f"{where} must not have leading or trailing whitespace"]
         return []
+
+    @classmethod
+    def _ref_errors(cls, ref, where) -> list[str]:
+        """Kontoreferenz ``name`` oder ``name@host``; Leerraum am Rand von Name oder Host ist verboten."""
+        if not isinstance(ref, str) or not ref:
+            return [f"{where} must be an account name (name or name@host)"]
+        name, host = account(ref)
+        return cls._name_errors(name, where, 32) + cls._name_errors(host, f"{where} host", 255)
 
     def _validate_Target(self, spec):
         ep = spec.get("endpoint")
@@ -194,8 +210,6 @@ class MySQLAdapter(Adapter):
     def _validate_Database(self, spec):
         name = spec["name"]
         errors = self._name_errors(name, "spec.name", 64)
-        if isinstance(name, str) and name != name.rstrip():
-            errors.append("spec.name must not end with a space")
         for key in ("characterSet", "collation"):
             if key in spec and not (isinstance(spec[key], str) and CHARSET_RE.fullmatch(spec[key].lower())):
                 errors.append(f"spec.{key} must be a MySQL charset/collation name")
@@ -216,8 +230,10 @@ class MySQLAdapter(Adapter):
     def _validate_DatabaseUser(self, spec):
         errors = self._validate_identity(spec)
         for key in ("roles", "defaultRoles"):
-            if key in spec and not (isinstance(spec[key], list) and all(isinstance(r, str) and r for r in spec[key])):
+            if key in spec and not isinstance(spec[key], list):
                 errors.append(f"spec.{key} must be a list of account names (name or name@host)")
+            elif key in spec:
+                errors += [e for i, r in enumerate(spec[key]) for e in self._ref_errors(r, f"spec.{key}[{i}]")]
         if not errors and "defaultRoles" in spec and "roles" in spec and not (
                 {account(r) for r in spec["defaultRoles"]} <= {account(r) for r in spec["roles"]}):
             errors.append("spec.defaultRoles must be a subset of spec.roles")
@@ -226,8 +242,7 @@ class MySQLAdapter(Adapter):
         return errors
 
     def _validate_Grant(self, spec):
-        errors = [] if isinstance(spec.get("grantee"), str) and spec["grantee"] else [
-            "spec.grantee must be an account name (name or name@host)"]
+        errors = self._ref_errors(spec.get("grantee"), "spec.grantee")
         level = spec.get("on")
         if level not in LEVELS:
             return [*errors, f"spec.on must be one of {list(LEVELS)}"]
@@ -281,10 +296,13 @@ class MySQLAdapter(Adapter):
     # --- Planungsprüfung (INV-10) -----------------------------------------------------------------
 
     def check(self, session, resource, allow_privileged=False):
-        if resource.kind in ("DatabaseUser", "DatabaseRole") and account(resource.id)[0] in SYSTEM_USERS:
+        # alle Kontovergleiche gegen die Zeile, die MySQL selbst auflöst (PAD SPACE, Host-Kollation)
+        if resource.kind in ("DatabaseUser", "DatabaseRole") and \
+                account(self._canon(session, resource.id))[0] in SYSTEM_USERS:
             return f"account {resource.id!r} is a system account"
         if resource.kind == "DatabaseUser":
-            roles = sorted({*resource.attrs.get("roles", []), *resource.attrs.get("defaultRoles", [])})
+            roles = sorted({self._canon(session, r) for r in
+                            (*resource.attrs.get("roles", []), *resource.attrs.get("defaultRoles", []))})
             for role in roles:
                 if account(role)[0] in SYSTEM_USERS or role == session.current:
                     return f"role {role!r} is a system account or the admin login"
@@ -300,13 +318,25 @@ class MySQLAdapter(Adapter):
                             "allowPrivilegedGrants")
         if resource.kind == "Grant":
             a = resource.attrs
-            if account(a["grantee"])[0] in SYSTEM_USERS or a["grantee"] == session.current:
+            grantee = self._canon(session, a["grantee"])
+            if account(grantee)[0] in SYSTEM_USERS or grantee == session.current:
                 return f"grantee {a['grantee']!r} is a system account or the admin login"
             if "database" in a and not self._in(session.scope, "databases", a["database"]):
                 return f"database {a['database']!r} is outside the target scope"
             if (privileged := _privileged(a)) and not allow_privileged:
                 return f"privileged grant ({', '.join(privileged)}) requires operator policy allowPrivilegedGrants"
         return None
+
+    def _canon(self, session, rid: str) -> str:
+        """``rid`` in der Schreibweise der passenden ``mysql.user``-Zeile (sonst unverändert)."""
+        cache = session.cache.setdefault("canon", {})
+        if rid not in cache:
+            name, host = account(rid)
+            lit = session.conn.escape
+            rows = self._run(session, f"SELECT User, Host FROM mysql.user WHERE User = {lit(name)} "
+                                      f"AND Host = {lit(host)}")
+            cache[rid] = _id(*rows[0]) if len(rows) == 1 else rid
+        return cache[rid]
 
     def _lookup(self, session):
         """({konto: ist_rolle}, Konten mit globalen oder Systemdatenbank-Rechten), ungefiltert vom Scope."""
@@ -318,7 +348,13 @@ class MySQLAdapter(Adapter):
                         if any(c.endswith("_priv") and v == "Y" for c, v in r.items())}
             powerful |= {_id(u, h) for u, h in self._run(session, "SELECT USER, HOST FROM mysql.global_grants")}
             powerful |= {_id(u, h) for u, h, db in self._run(session, "SELECT User, Host, Db FROM mysql.db")
-                         if _db_pattern(db)[0].lower() in SYSTEM_DATABASES}
+                         if _system_pattern(db)}
+            powerful |= {_id(u, h) for u, h, db in self._run(
+                session, "SELECT User, Host, Db FROM mysql.tables_priv UNION ALL SELECT User, Host, Db FROM "
+                         "mysql.columns_priv UNION ALL SELECT User, Host, Db FROM mysql.procs_priv")
+                         if db.lower() in SYSTEM_DATABASES}
+            # PROXY erlaubt, als das Zielkonto zu handeln (z. B. root): jeder Proxy-Eintrag zählt als mächtig
+            powerful |= {_id(u, h) for u, h in self._run(session, "SELECT User, Host FROM mysql.proxies_priv")}
             session.cache["lookup"] = accounts, powerful
         return session.cache["lookup"]
 
@@ -572,23 +608,22 @@ class MySQLAdapter(Adapter):
         name, host = account(resource.id)
         lit = session.conn.escape
         try:
-            locking = self._run(session, "SELECT JSON_EXTRACT(User_attributes, "
-                                         "'$.Password_locking.failed_login_attempts') FROM mysql.user "
-                                         f"WHERE User = {lit(name)} AND Host = {lit(host)}")
+            # alle Zeilen, die beim Login greifen könnten (jeder Host, anonyme Konten), nicht nur name@host
+            locking = self._run(session, "SELECT JSON_EXTRACT(User_attributes, '$.Password_locking') "
+                                         f"FROM mysql.user WHERE User IN ({lit(name)}, '')")
             control = self._run(session, "SELECT 1 FROM information_schema.PLUGINS WHERE PLUGIN_NAME LIKE "
                                          "'CONNECTION_CONTROL%' AND PLUGIN_STATUS = 'ACTIVE' UNION ALL "
                                          "SELECT 1 FROM mysql.component "
                                          "WHERE component_urn LIKE '%connection_control%'")
-            # andere Einträge mit diesem Namen oder anonyme Konten können beim Login greifen: 1045 beweist dann nichts
-            shadows = self._run(session, f"SELECT COUNT(*) FROM mysql.user WHERE User IN ({lit(name)}, '')")[0][0]
         except (PermanentError, AuthorizationError, TransientError):
             return None
-        if control or (locking and locking[0][0] not in (None, 0, "0")):
+        # mehrere passende Zeilen: der Login träfe evtl. eine andere (und 1045 bewiese nichts); Sperrregel: nie
+        if control or len(locking) != 1 or locking[0][0] is not None:
             return None
         try:
             conn = _open(target["endpoint"], name, password.reveal())
         except pymysql.MySQLError as e:
-            wrong = e.args and e.args[0] == 1045 and host == "%" and shadows == 1
+            wrong = e.args and e.args[0] == 1045 and host == "%"
             return False if wrong else None
         except Exception:  # OSError, RuntimeError (cryptography fehlt für caching_sha2) …: nicht prüfbar
             return None

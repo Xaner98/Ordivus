@@ -87,10 +87,25 @@ Ohne Operator Policy `allowPrivilegedGrants: true` wird eine Rolle bzw. ein Benu
 - `memberOf` einer vordefinierten Rolle `pg_*` (z. B. `pg_execute_server_program`,
   `pg_read_server_files`, `pg_write_server_files`, `pg_read_all_data`),
 - `memberOf` einer Rolle, die selbst oder über ihre eigenen Mitgliedschaften (transitiv)
-  `SUPERUSER`, `CREATEROLE`, `REPLICATION` oder `BYPASSRLS` hat oder in einer `pg_*`-Rolle ist.
+  `SUPERUSER`, `CREATEROLE`, `REPLICATION` oder `BYPASSRLS` hat, in einer `pg_*`-Rolle ist oder
+  `LOGIN` hat (Mitgliedschaft in einem anderen Benutzerkonto erbt dessen Rechte und Objekte).
+
+Grants (Kind `Grant`) sind ohne Freigabe `BLOCKED`, wenn sie dem Empfänger erlauben, Code unter einer
+fremden Identität ausführen zu lassen:
+
+- `TRIGGER` auf `tables-in-schema`: Ein Trigger läuft als der Benutzer, der in die Tabelle schreibt.
+  Schreibt ein Superuser (oder ein Wartungsjob) in die Tabelle, führt er den Code des Empfängers mit
+  Superuser-Rechten aus.
+- `MAINTAIN` auf `tables-in-schema` (PostgreSQL 17): `VACUUM`/`ANALYZE`/`REINDEX`/`REFRESH` werten
+  Index- und Funktionsausdrücke aus, die andere Rollen auslösen.
+- `CREATE` auf `schema`: Der Empfänger kann Funktionen, Operatoren oder Tabellen anlegen, die im
+  `search_path` anderer Rollen (etwa `public`) vor den gemeinten Objekten gefunden werden.
+- `CREATE` auf `database`: Der Empfänger kann ein Schema mit dem Namen einer anderen Rolle anlegen;
+  das steht wegen `"$user"` am Anfang des Standard-`search_path` dieser Rolle (gleiche Wirkung).
 
 **Immer** `BLOCKED`, auch mit Freigabe: `memberOf`, das (transitiv) die Rolle der Ordivus-Anmeldung
-(`endpoint.user`) oder den Bootstrap-Superuser (OID 10, meist `postgres`) vergibt. Geprüft wird gegen
+(`endpoint.user`) oder den Bootstrap-Superuser (OID 10, meist `postgres`) vergibt, und – sobald
+`spec.scope.roles` gesetzt ist – `memberOf` einer Rolle außerhalb dieses Scopes (auch `pg_*`). Geprüft wird gegen
 den Live-Zustand der Rollen beim Lauf; eine noch nicht existierende Elternrolle wird bei ihrer eigenen
 Deklaration geprüft.
 

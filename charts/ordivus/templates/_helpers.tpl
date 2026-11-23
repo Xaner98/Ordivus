@@ -226,23 +226,23 @@ spec:
 {{- end }}
 
 {{/* CEL-Ausdruck: Feld unter .path enthält mindestens die Werte aus .value (Defaults des API-Servers bleiben
-     erlaubt); Listen von Objekten müssen gleich lang sein. Für die ValidatingAdmissionPolicy (admission.yaml). */}}
+     erlaubt); Listen von Objekten müssen gleich lang sein. Mit .exact keine zusätzlichen Schlüssel. Für admission.yaml. */}}
 {{- define "ordivus.celMatch" -}}
 {{- $p := .path -}}
 {{- $v := .value -}}
 {{- if kindIs "map" $v -}}
-{{- $parts := list -}}
+{{- $parts := ternary (list (printf "dyn(%s).all(k, k in %s)" $p (keys $v | sortAlpha | toJson))) list (.exact | default false) -}}
 {{- range $k, $x := $v -}}
 {{- if regexMatch "^[a-zA-Z_][a-zA-Z0-9_]*$" $k -}}
-{{- $parts = append $parts (printf "has(%s.%s) && %s" $p $k (include "ordivus.celMatch" (dict "path" (printf "%s.%s" $p $k) "value" $x))) -}}
+{{- $parts = append $parts (printf "has(%s.%s) && %s" $p $k (include "ordivus.celMatch" (dict "path" (printf "%s.%s" $p $k) "value" $x "exact" $.exact))) -}}
 {{- else -}}
-{{- $parts = append $parts (printf "%s in %s && %s" (toJson $k) $p (include "ordivus.celMatch" (dict "path" (printf "%s[%s]" $p (toJson $k)) "value" $x))) -}}
+{{- $parts = append $parts (printf "%s in %s && %s" (toJson $k) $p (include "ordivus.celMatch" (dict "path" (printf "%s[%s]" $p (toJson $k)) "value" $x "exact" $.exact))) -}}
 {{- end -}}
 {{- end -}}
 ({{ $parts | join " && " | default "true" }})
 {{- else if and (kindIs "slice" $v) $v (kindIs "map" (first $v)) -}}
 {{- $parts := list (printf "%s.size() == %d" $p (len $v)) -}}
-{{- range $i, $x := $v }}{{ $parts = append $parts (include "ordivus.celMatch" (dict "path" (printf "%s[%d]" $p $i) "value" $x)) }}{{ end -}}
+{{- range $i, $x := $v }}{{ $parts = append $parts (include "ordivus.celMatch" (dict "path" (printf "%s[%d]" $p $i) "value" $x "exact" $.exact)) }}{{ end -}}
 ({{ $parts | join " && " }})
 {{- else -}}
 {{ $p }} == {{ toJson $v }}

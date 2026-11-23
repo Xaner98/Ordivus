@@ -97,13 +97,15 @@ def _attrs(spec: dict) -> dict:
 
 
 def _allowed(commands: list[str], command: str, category) -> bool:
-    """Ob die normalisierte Regelliste ``command`` (``cmd`` oder ``cmd|sub``) erlaubt; ``category(name)``
-    liefert die Befehle einer Kategorie (ACL CAT). Spätere Regeln gewinnen, wie in Redis."""
+    """Ob die normalisierte Regelliste ``command`` (``cmd`` oder ``cmd|sub``) ganz oder teilweise erlaubt;
+    ``category(name)`` liefert die Befehle einer Kategorie (ACL CAT). Spätere Regeln gewinnen, wie in Redis."""
     allowed = commands[0] == "+@all"
     for rule in commands[1:]:
         name = rule[1:]
+        # +parent|sub erlaubt einen Teil von parent: ACL CAT listet bei Modulbefehlen (ft.config) nur den Parent
+        part = rule[0] == "+" and name.partition("|")[0] == command
         hit = command in category(name[1:]) if name.startswith("@") else \
-            command == name or ("|" not in name and command.startswith(name + "|"))
+            command == name or part or ("|" not in name and command.startswith(name + "|"))
         if hit:
             allowed = rule[0] == "+"
     return allowed

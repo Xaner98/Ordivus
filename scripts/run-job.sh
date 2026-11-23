@@ -40,11 +40,23 @@ echo "context: ${ctx:-$("$kubectl" config current-context 2>/dev/null || echo '?
 mkdir -p "$dir"
 # Kein veralteter Report aus einem früheren Lauf.
 rm -f "$dir/$mode.json" "$dir/$mode.log"
-reports=0
+reports=0 pod=""
+# Report-Zeile: gültiges JSON-Objekt mit type "report" und schemaVersion. Ohne jq nur das exakte Präfix der
+# Engine (core/report.py) mit schließender Klammer; eine Log-Zeile genau dieser Form zählt dann ebenfalls.
+report_lines() {
+  if command -v jq >/dev/null; then
+    jq -rR '. as $l | fromjson? | select(type == "object" and .type == "report" and has("schemaVersion")) | $l' "$1"
+  else
+    grep -E '^\{"type":"report","schemaVersion":"[^"]+",.*\}$' "$1"
+  fi
+}
 collect() {
-  k logs "job/$job" >"$dir/$mode.log" 2>/dev/null || true
+  # Jüngster Pod des Jobs (bei backoffLimit > 0 kann es mehrere geben); Logs und Exit-Code stammen beide von ihm.
+  pod=$(k get pods -l "job-name=$job" --sort-by=.metadata.creationTimestamp -o 'jsonpath={.items[-1:].metadata.name}' 2>/dev/null) || pod=""
+  : >"$dir/$mode.log"
+  [ -z "$pod" ] || k logs "pod/$pod" >"$dir/$mode.log" 2>/dev/null || true
   cat "$dir/$mode.log" >&2
-  grep '^{"type":"report"' "$dir/$mode.log" >"$dir/$mode.json.tmp" || true
+  report_lines "$dir/$mode.log" >"$dir/$mode.json.tmp" || true
   reports=$(wc -l <"$dir/$mode.json.tmp" | tr -d ' ')
   if [ "$reports" -eq 1 ]; then
     mv "$dir/$mode.json.tmp" "$dir/$mode.json"
@@ -79,9 +91,8 @@ while :; do
 done
 
 collect
-# Jüngster Pod des Jobs (bei backoffLimit > 0 kann es mehrere geben).
-code=$(k get pods -l "job-name=$job" --sort-by=.metadata.creationTimestamp \
-  -o 'jsonpath={.items[-1:].status.containerStatuses[0].state.terminated.exitCode}')
+code=""
+[ -z "$pod" ] || code=$(k get pod "$pod" -o 'jsonpath={.status.containerStatuses[0].state.terminated.exitCode}')
 if [ -z "$code" ]; then
   echo "job/$job finished without container exit code (state $state), e.g. deadline exceeded" >&2
   exit 1

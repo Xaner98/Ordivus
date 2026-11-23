@@ -162,7 +162,11 @@ Ohne `--policy` gelten genau diese Werte. Eine angegebene, aber fehlende oder fe
 
 Schwellen: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable|unmanaged|unknown|any`. `unknown` schlägt an, sobald etwas nicht feststellbar war (`UNKNOWN`-Operationen oder Target-Status `incomplete`); `any` schließt das ein. Ohne `--fail-on` enden `plan` und `drift` mit 0, auch wenn Abweichungen gefunden wurden.
 
-Target-Status im Report: `in_sync`, `drift_detected`, `incomplete` (Inventar unvollständig oder eine deklarierte Ressource bzw. ihr Passwort nicht prüfbar), bei `apply` außerdem `applied`, `partial` und `error`. Ein `apply` meldet nie `in_sync`, solange eine deklarierte Ressource `UNKNOWN` ist. Ein unerwarteter Fehler (z. B. ein Adapter-Bug) macht nur dieses Target zum Fehler; die übrigen Targets laufen weiter. Auf stderr erscheint dann nur der Fehlertyp; einen Traceback gibt es nur mit `ORDIVUS_DEBUG=1` (kann Secrets enthalten, nur zur Fehlersuche).
+Target-Status im Report: `in_sync`, `drift_detected`, `incomplete` (Inventar unvollständig oder eine deklarierte Ressource bzw. ihr Passwort nicht prüfbar), bei `apply` außerdem `applied`, `partial` und `error`. Ein `apply` meldet nie `in_sync`, solange eine deklarierte Ressource `UNKNOWN` ist, und im authoritative Mode auch nicht, solange das Inventar unvollständig ist (dann `incomplete`, Exit 13). Ein unerwarteter Fehler (z. B. ein Adapter-Bug) macht nur dieses Target zum Fehler; die übrigen Targets laufen weiter. Auf stderr erscheint dann nur der Fehlertyp; einen Traceback gibt es nur mit `ORDIVUS_DEBUG=1` (kann Secrets enthalten, nur zur Fehlersuche).
+
+## Proxy
+
+Die HTTP-Adapter (OpenBao, ClickHouse, ArcadeDB) und der Credential Provider `openbao-kv-v2` beachten die Umgebungsvariablen `HTTP_PROXY`/`HTTPS_PROXY` (bzw. klein geschrieben) und `NO_PROXY`. Geht ein Ziel über einen Proxy, schreibt Ordivus einmal je Ziel eine Warnung nach stderr (`… is reached via proxy …`). Über `http://` sieht der Proxy Zugangsdaten und Tokens im Klartext; bei `https://` sieht er nur das Ziel. Interne Ziele deshalb in `NO_PROXY` eintragen. Datenbank-Treiber (PostgreSQL, MySQL, Redis) nutzen keinen Proxy.
 
 ## Report
 
@@ -174,4 +178,4 @@ ordivus drift -f ./config --format json | grep '"type": *"report"' > report.json
 
 Operationen an nicht veränderbaren oder geschützten Objekten tragen `"manageable": false` bzw. `"system": true`. Passwörter erscheinen nur als `CREATE_SECRET` und `SET_PASSWORD` (Wert immer `<redacted>`), nie unter den Änderungen eines `CREATE`. Kann ein Credential Provider den Zustand eines Secrets nicht bestimmen oder ist ein Secret leer, steht der Grund als `reason` an der Credential-Operation (`UNKNOWN`, bzw. `BLOCKED`, wenn nur ein manueller Eingriff hilft); ein leeres Secret wird nie als Passwort gesetzt. Alle Texte im Report und in den Logs werden gegen die im Lauf gelesenen Secrets geprüft und ersetzt (`<redacted>`).
 
-Mit `--output DATEI` landet der Report in einer Datei (neu angelegt mit Rechten `0600`; ein Symlink als Ziel wird abgelehnt). Ordivus speichert Reports nicht selbst; das Aufzeichnen übernimmt das aufrufende System (CI-Artefakt, Log-Sammlung).
+Mit `--output DATEI` landet der Report in einer Datei (neu angelegt mit Rechten `0600`; ein Symlink als Ziel wird abgelehnt). Eine vorhandene Datei überschreibt Ordivus nur, wenn sie eine reguläre Datei des aufrufenden Benutzers ist; sie bekommt dabei ebenfalls `0600`. Scheitert das Schreiben, steht der Fehler auf stderr und der Exit-Code des Laufs bleibt erhalten (z. B. 14 nach teilweisem `apply`); nur ein sonst erfolgreicher Lauf endet dann mit 1. Ordivus speichert Reports nicht selbst; das Aufzeichnen übernimmt das aufrufende System (CI-Artefakt, Log-Sammlung).

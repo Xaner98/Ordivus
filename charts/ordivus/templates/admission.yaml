@@ -4,7 +4,22 @@
 {{- /* Erwartete Werte aus der gerenderten Apply-Vorlage; resources entfällt (API-Server normalisiert Quantities). */}}
 {{- $tpl := (include "ordivus.cronJob" (dict "root" . "name" "apply" "mode" "apply" "t" .Values.jobs.templates.apply "suspend" true) | fromYaml).spec.jobTemplate.spec.template }}
 {{- $spec := $tpl.spec }}
-{{- $c := omit (index $spec.containers 0) "resources" }}
+{{- $c := index $spec.containers 0 }}
+{{- /* Erlaubte Schlüssel: was die Vorlage rendert plus was API-Server-Defaulting und Standard-Admission-Plugins
+     (Priority, DefaultTolerationSeconds) vor der Validierung ergänzen; deren Werte prüft $defaults. */}}
+{{- $specKeys := concat (keys $spec) (list "dnsPolicy" "schedulerName" "serviceAccount" "priority" "preemptionPolicy" "tolerations") | uniq | sortAlpha }}
+{{- $cKeys := concat (keys $c) (list "terminationMessagePath" "terminationMessagePolicy") | uniq | sortAlpha }}
+{{- /* Tolerations: die der Vorlage oder die von DefaultTolerationSeconds (not-ready/unreachable, NoExecute). */}}
+{{- $tols := list "(has(t.key) && t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'] && has(t.operator) && t.operator == 'Exists' && has(t.effect) && t.effect == 'NoExecute' && dyn(t).all(k, k in ['effect', 'key', 'operator', 'tolerationSeconds']))" }}
+{{- range $spec.tolerations }}{{ $tols = append $tols (include "ordivus.celMatch" (dict "path" "t" "value" . "exact" true)) }}{{ end }}
+{{- $defaults := list
+  "(!has(object.spec.dnsPolicy) || object.spec.dnsPolicy == 'ClusterFirst')"
+  "(!has(object.spec.schedulerName) || object.spec.schedulerName == 'default-scheduler')"
+  (printf "(!has(object.spec.serviceAccount) || object.spec.serviceAccount == %s)" (toJson $spec.serviceAccountName))
+  (printf "(!has(object.spec.tolerations) || object.spec.tolerations.all(t, %s))" ($tols | join " || "))
+  "(!has(object.spec.containers[0].terminationMessagePath) || object.spec.containers[0].terminationMessagePath == '/dev/termination-log')"
+  "(!has(object.spec.containers[0].terminationMessagePolicy) || object.spec.containers[0].terminationMessagePolicy == 'File')" }}
+{{- range $k := list "nodeSelector" "affinity" }}{{ if hasKey $spec $k }}{{ $defaults = append $defaults (printf "(!has(object.spec.%s) || %s)" $k (include "ordivus.celMatch" (dict "path" (printf "object.spec.%s" $k) "value" (get $spec $k) "exact" true))) }}{{ end }}{{ end }}
 {{- $labels := list }}
 {{- range $k, $x := $tpl.metadata.labels }}{{ $labels = append $labels (printf "object.metadata.labels[%s] == %s" (toJson $k) (toJson $x)) }}{{ end }}
 # Pods mit dem Apply-ServiceAccount im Apply-Namespace nur, wenn sie der gerenderten Apply-Vorlage entsprechen
@@ -29,14 +44,14 @@ spec:
       message: pods using the apply ServiceAccount must carry the apply template labels
     - expression: {{ printf "has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(o, has(o.controller) && o.controller && o.apiVersion == 'batch/v1' && o.kind == 'Job' && o.name.startsWith(%s))" (toJson (printf "%s-apply-" .Release.Name)) | toJson }}
       message: pods using the apply ServiceAccount must be controlled by a Job created from the apply CronJob
-    - expression: {{ list
-        "object.spec.containers.size() == 1 && !has(object.spec.initContainers) && !has(object.spec.ephemeralContainers)"
-        "!has(object.spec.containers[0].command) && !has(object.spec.containers[0].envFrom)"
-        (ternary "true" "!has(object.spec.containers[0].env)" (hasKey $c "env"))
-        (include "ordivus.celMatch" (dict "path" "object.spec.containers[0]" "value" $c))
-        (include "ordivus.celMatch" (dict "path" "object.spec" "value" (dict "volumes" $spec.volumes)))
-        "!(has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken)"
-        "!(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)"
+    # dyn(): Pod-Typen sind keine Maps; erst dyn() erlaubt die Iteration über die gesetzten Schlüssel.
+    - expression: {{ printf "dyn(object.spec).all(k, k in %s) && object.spec.containers.size() == 1 && dyn(object.spec.containers[0]).all(k, k in %s)" (toJson $specKeys) (toJson $cKeys) | toJson }}
+      message: pods using the apply ServiceAccount must not set fields outside the apply CronJob pod template
+    - expression: {{ concat (list
+        (include "ordivus.celMatch" (dict "path" "object.spec.containers[0]" "value" (omit $c "resources" "securityContext")))
+        (include "ordivus.celMatch" (dict "path" "object.spec" "value" (omit $spec "containers" "securityContext" "nodeSelector" "affinity" "tolerations")))
+        (include "ordivus.celMatch" (dict "path" "object.spec.securityContext" "value" $spec.securityContext "exact" true))
+        (include "ordivus.celMatch" (dict "path" "object.spec.containers[0].securityContext" "value" $c.securityContext "exact" true))) $defaults
         | join " && " | toJson }}
       message: pods using the apply ServiceAccount must match the apply CronJob pod template
 ---

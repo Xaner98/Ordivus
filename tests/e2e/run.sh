@@ -98,6 +98,25 @@ rejects "invalid profile rejected" --set security.profile=yolo
 check "inline config renders ConfigMap" has "$(helm template ordivus "$chart" --set configuration.source=inline \
   --set-string 'configuration.files.a\.yaml=x: 1')" 'name: "ordivus-configuration"'
 
+echo "== run-job.sh with fake kubectl"
+fake=$(mktemp -d)
+cat >"$fake/kubectl" <<'FAKE'
+#!/bin/sh
+case "$*" in
+  *"get pods"*) echo pod-new ;;
+  *"logs pod/pod-new"*) printf '%s\n' '{"type":"report" from stderr' '{"type":"report","note":"no schemaVersion"}' \
+    '{"type":"report","schemaVersion":"1.0","run":{"mode":"plan"}}' ;;
+  *logs*) echo '{"type":"report","schemaVersion":"1.0","run":{"mode":"wrong-pod"}}' ;;
+  *"get pod pod-new"*) echo 0 ;;
+  *"get job"*) echo Complete ;;
+esac
+FAKE
+chmod +x "$fake/kubectl"
+rc=0; KUBECTL="$fake/kubectl" ORDIVUS_REPORT_DIR="$fake/r" scripts/run-job.sh plan ns >/dev/null 2>&1 || rc=$?
+check "fake run: exit code 0 (got $rc)" [ "$rc" -eq 0 ]
+check "fake run: only the real report of the newest pod" [ "$(cat "$fake/r/plan.json")" = '{"type":"report","schemaVersion":"1.0","run":{"mode":"plan"}}' ]
+rm -rf "$fake"
+
 if [ "${ORDIVUS_E2E:-}" != 1 ]; then
   echo "SKIP cluster tests (set ORDIVUS_E2E=1)"
   [ "$fails" -eq 0 ] || { echo "$fails check(s) failed"; exit 1; }
@@ -198,11 +217,25 @@ if command -v jq >/dev/null; then
   # Grenze: eine unveränderte Kopie der Vorlage mit gefälschter ownerReference wird zugelassen (docs/kubernetes.md).
   check "admission accepts unmodified template copy" sh -c \
     'printf "%s" "$1" | kubectl --context docker-desktop -n ordivus-e2e-apply create --dry-run=server -f -' sh "$tpl"
+  x='{exec: {command: ["sh", "-c", "cat /var/run/secrets/ordivus/*"]}}'
   for patch in '.spec.containers[0].command=["sh"]' '.spec.volumes[0].configMap.name="evil"' \
-    '.spec.automountServiceAccountToken=true' '.spec.containers[0].env=[{name:"X",value:"y"}]'; do
+    '.spec.automountServiceAccountToken=true' '.spec.containers[0].env=[{name:"X",value:"y"}]' \
+    ".spec.containers[0].livenessProbe=$x" ".spec.containers[0].readinessProbe=$x" ".spec.containers[0].startupProbe=$x" \
+    ".spec.containers[0].lifecycle={postStart: $x}" ".spec.containers[0].lifecycle={preStop: $x}" \
+    '.spec.hostAliases=[{ip: "10.66.66.66", hostnames: ["postgres.internal"]}]' \
+    '.spec.dnsPolicy="None" | .spec.dnsConfig={nameservers: ["10.66.66.66"]}' '.spec.dnsPolicy="Default"' \
+    '.spec.nodeName="docker-desktop"' '.spec.nodeSelector={"kubernetes.io/hostname": "docker-desktop"}' \
+    '.spec.tolerations=[{operator: "Exists"}]' '.spec.affinity={}' '.spec.shareProcessNamespace=true' \
+    '.spec.hostNetwork=true' '.spec.securityContext.runAsUser=0' \
+    '.spec.securityContext.supplementalGroups=[0]' '.spec.containers[0].securityContext += {privileged: true, allowPrivilegeEscalation: true}' \
+    '.spec.containers[0].securityContext.capabilities.add=["NET_RAW"]' '.spec.containers[0].ports=[{containerPort: 80}]' \
+    '.spec.containers[0].stdin=true' '.spec.containers[0].workingDir="/tmp"' \
+    '.spec.initContainers=[.spec.containers[0] + {name: "init", command: ["sh"]}]' \
+    'del(.spec.serviceAccountName) | .spec.serviceAccount="ordivus-apply" | .spec.containers[0].command=["sh"]'; do
+    # Ablehnung muss von der Policy kommen, nicht von jq oder anderer Validierung.
     check "admission denies template copy with $patch" sh -c \
-      '! printf "%s" "$1" | jq "$2" | kubectl --context docker-desktop -n ordivus-e2e-apply create --dry-run=server -f -' \
-      sh "$tpl" "$patch"
+      'printf "%s" "$1" | jq "$2" | kubectl --context docker-desktop -n ordivus-e2e-apply create --dry-run=server -f - 2>&1 |
+       grep -q "ValidatingAdmissionPolicy"' sh "$tpl" "$patch"
   done
 fi
 check "admission allows other ServiceAccounts" sh -c \

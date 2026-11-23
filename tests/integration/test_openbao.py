@@ -290,3 +290,46 @@ def test_kv_v1_mount_is_unknown_never_absent(tmp_path, uid):
     # gewöhnliches Token mit Leserecht auf dem KV-v2-Pfad: weiterhin absent
     reader = token_with(f"it-kv2-{uid}", f'path "secret/+/it/{uid}/*" {{ capabilities = ["read"] }}')
     assert provider(tmp_path, reader).state({"path": f"it/{uid}/x"}) == ABSENT
+
+
+PRIVILEGED_POLICIES = {
+    "sudo": 'path "secret/data/x" { capabilities = ["read", "sudo"] }',
+    "sys": 'path "sys/policies/acl/*" { capabilities = ["read"] }',
+    "star": 'path "*" { capabilities = ["read"] }',
+    "glob": 'path "s*" { capabilities = ["list"] }',
+    "plus": 'path "+/policies/acl/x" { capabilities = ["update"] }',
+    "auth": 'path "auth/userpass/users/*" { capabilities = ["create", "update"] }',
+    "identity": 'path "identity/entity/*" { capabilities = ["update"] }',
+    "tokenglob": 'path "auth/token/*" { capabilities = ["update"] }',
+    "template": 'path "{{identity.entity.name}}/*" { capabilities = ["update"] }',
+    "hidden": 'path "secret/x" { capabilities = ["read"] } /* */ path "sys/*" { capabilities = ["read"]\n'
+              'allowed_parameters = { "*" = [] } }',
+    "json": '{"path": {"sys/*": {"capabilities": ["sudo"]}}}',
+}
+HARMLESS_POLICIES = {
+    "app": '# app\npath "secret/data/app/*" { capabilities = ["read", "list"] } // trailing\n'
+           'path "sys/*" { capabilities = ["deny"] }',
+    "authread": 'path "auth/token/lookup-self" { capabilities = ["read"] }',
+    "hash": 'path "secret/data/a#b" { capabilities = ["read"] }',
+    "selftoken": 'path "auth/token/renew-self" { capabilities = ["update"] }\n'
+                 'path "auth/token/revoke-self" { capabilities = ["update"] }\n'
+                 'path "auth/token/lookup-self" { capabilities = ["read", "update"] }',
+}
+
+
+def test_privileged_policies_need_operator_policy(tmp_path, uid):
+    names = {k: f"it-priv-{k}-{uid}" for k in (*PRIVILEGED_POLICIES, *HARMLESS_POLICIES, "rules")}
+    docs = [doc("OpenBaoPolicy", k, targetRef="bao", policyName=names[k], policy=hcl)
+            for k, hcl in {**PRIVILEGED_POLICIES, **HARMLESS_POLICIES}.items()]
+    docs.append(doc("OpenBaoPolicy", "rules", targetRef="bao", policyName=names["rules"],
+                    rules=[{"path": "sys/mounts", "capabilities": ["read"]}]))
+    directory = policy_config(tmp_path, ROOT, *docs)
+    plan = engine.run("plan", config.load(directory), OperatorPolicy())
+    assert {k for k, n in names.items() if ops(plan)[n] == "BLOCKED"} == {*PRIVILEGED_POLICIES, "rules"}
+    allowed = engine.run("plan", config.load(directory), OperatorPolicy(allowPrivilegedGrants=True))
+    assert {ops(allowed)[n] for n in names.values()} == {"CREATE"}
+    rep = engine.run("apply", config.load(directory), OperatorPolicy())
+    assert report.exit_code(rep) == 11
+    assert all(bao("GET", f"sys/policies/acl/{names[k]}")[0] == 404 for k in (*PRIVILEGED_POLICIES, "rules"))
+    for k in HARMLESS_POLICIES:
+        bao("DELETE", f"sys/policies/acl/{names[k]}")

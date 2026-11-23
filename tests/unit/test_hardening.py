@@ -267,6 +267,56 @@ def test_output_file_private_and_no_symlink(cfg, tmp_path, capsys):
     assert not (tmp_path / "elsewhere").exists()
 
 
+def test_output_file_existing_must_be_own_regular_file(cfg, tmp_path, capsys):
+    out = tmp_path / "old.txt"
+    out.write_text("x" * 10000)
+    os.chmod(out, 0o644)
+    assert main(["plan", "-f", str(cfg()), "--output", str(out)]) == ExitCode.OK
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600 and "x" not in out.read_text()  # gekürzt, 0600
+    os.mkfifo(tmp_path / "fifo")
+    for bad in (tmp_path / "fifo", tmp_path):  # FIFO (blockiert nicht) und Verzeichnis
+        assert main(["plan", "-f", str(cfg()), "--output", str(bad)]) == ExitCode.INTERNAL
+    if os.getuid() == 0:  # fremde Datei nur als root herstellbar
+        os.chown(out, 4242, 4242)
+        assert main(["plan", "-f", str(cfg()), "--output", str(out)]) == ExitCode.INTERNAL
+        assert "owned by the current user" in capsys.readouterr().err
+
+
+def test_output_write_failure_keeps_run_exit_code(cfg, fake, tmp_path, capsys):
+    fake.fail[("i1", "CREATE", "a")] = "boom"
+    path = cfg(doc("FakeItem", "a", targetRef="t1"))
+    assert main(["apply", "-f", str(path), "--output", str(tmp_path)]) == ExitCode.PARTIAL  # nicht 1
+    assert "cannot write report" in capsys.readouterr().err
+
+
+def test_authoritative_apply_on_partial_inventory_is_incomplete(cfg, fake):
+    fake.discovery_status[("i1", "FakeItem")] = "partial"
+    gov = doc("ReconciliationPolicy", "gov", targetRef="t1", mode="authoritative",
+              scope={"resourceKinds": ["FakeItem"]})
+    rep = run(cfg(gov), "apply", allowAuthoritative=True)
+    assert rep["targets"][0]["status"] == "incomplete" and report.exit_code(rep) == ExitCode.TARGET
+    assert run(cfg(), "apply")["targets"][0]["status"] == "in_sync"  # additive: Undeklariertes egal
+
+
+def test_proxy_use_is_warned_and_no_proxy_honoured(monkeypatch, caplog):
+    import urllib.request
+
+    req = urllib.request.Request("http://127.0.0.1:9/x")
+    monkeypatch.setattr(net, "_warned", set())
+    monkeypatch.setenv("http_proxy", "http://user:pw@127.0.0.1:1")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    with pytest.raises(OSError):
+        net.urlopen(req, timeout=2)
+    assert "via proxy 127.0.0.1" in caplog.text and "pw" not in caplog.text
+    caplog.clear()
+    monkeypatch.setattr(net, "_warned", set())
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    with pytest.raises(OSError):
+        net.urlopen(req, timeout=2)
+    assert "proxy" not in caplog.text
+
+
 # --- L5: Plugins ersetzen keine eingebauten Adapter --------------------------------------------
 
 class Impostor(FakeAdapter):

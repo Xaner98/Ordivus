@@ -113,7 +113,8 @@ E-Mail-Adressen als Benutzernamen (`me@example.com@%`).
   und dann könnte sich jeder ohne Passwort anmelden. Ordivus lehnt das beim Anlegen ab.
 - `passwordPolicy: verify` meldet sich **wirklich** als der Benutzer an (siehe [Passwortprüfung](#passwortprüfung-verify)).
   Fehler 1045 (Zugriff verweigert) bedeutet nur dann „Passwort falsch“ (→ `SET_PASSWORD`), wenn das Konto den Host
-  `%` hat und es keinen weiteren Eintrag mit demselben Namen und kein anonymes Konto gibt. Alles andere ergibt
+  `%` hat und es keinen weiteren Eintrag mit demselben Namen und kein anonymes Konto gibt (sonst meldet Ordivus
+  sich gar nicht erst an). Alles andere ergibt
   `unknown` („password unverifiable“; in `apply` Status `incomplete`, Exit 13).
 
 ### User oder Rolle?
@@ -168,7 +169,14 @@ Ordivus in der Planung (`BLOCKED`, in `apply` Exit 11):
   `GRANT OPTION`, `CREATE ROLE`, `DROP ROLE`, `REPLICATION SLAVE`, `REPLICATION CLIENT`, `CREATE TABLESPACE`,
   `SHOW DATABASES` und alle `*_ADMIN` (z. B. `ROLE_ADMIN`, `BACKUP_ADMIN`) auf jeder Ebene,
 - als Rolle (`roles`/`defaultRoles`) ein **Benutzerkonto** statt einer Rolle,
-- als Rolle eine Rolle, die selbst oder über weitere Rollen globale Rechte oder Rechte auf einer Systemdatenbank hat.
+- als Rolle eine Rolle, die selbst oder über weitere Rollen globale Rechte, Rechte auf einer Systemdatenbank (auch
+  auf einzelnen Tabellen, Spalten oder Routinen dort, z. B. `GRANT UPDATE ON mysql.user`, und über Wildcard-Muster
+  wie `` `m%`.* ``) oder ein `PROXY`-Recht (`mysql.proxies_priv`, z. B. `GRANT PROXY ON root@'%'`) hat.
+
+MySQL vergleicht Kontonamen mit aufgefülltem Leerraum (`'root '` ist `root`) und Hosts ohne Groß-/Kleinschreibung.
+Deshalb sind Leerzeichen am Anfang oder Ende von Benutzernamen, Hosts, Rollen- und Grantee-Angaben sowie Datenbank-
+und Tabellennamen ein Konfigurationsfehler. Zusätzlich löst die Planung jede Kontoangabe über `mysql.user` mit
+MySQLs eigenem Vergleich auf und prüft die tatsächlich getroffene Zeile, nicht den Text.
 
 Immer gesperrt, auch mit `allowPrivilegedGrants: true`: Systemkonten und das eigene Login als Rolle, als Grantee
 oder als deklariertes Konto. Eine Rolle, die es noch nicht gibt, ist erlaubt: Sie entsteht über eine deklarierte
@@ -219,7 +227,9 @@ nur eine Read-only-Identität mit den Rechten oben.
 `verify` prüft das Passwort mit einem echten Login-Versuch. Ein falsches Passwort ist ein fehlgeschlagener Login am
 Server. Damit `plan`/`drift` kein Konto sperren, meldet Ordivus sich **nicht** an (Ergebnis `unknown`), wenn
 
-- das Konto `FAILED_LOGIN_ATTEMPTS` gesetzt hat (`mysql.user.User_attributes` → `Password_locking`) oder
+- irgendein Eintrag mit diesem Benutzernamen (auf jedem Host) oder ein anonymes Konto `FAILED_LOGIN_ATTEMPTS`
+  gesetzt hat (`mysql.user.User_attributes` → `Password_locking`): der Login könnte diesen Eintrag treffen,
+- es neben dem Konto weitere Einträge mit demselben Namen oder anonyme Konten gibt oder
 - das Plugin oder die Komponente `connection_control` aktiv ist (verzögert Logins nach Fehlversuchen).
 
 Fehlt die Bibliothek `cryptography` (nötig für `caching_sha2_password` ohne TLS), ist das Ergebnis ebenfalls

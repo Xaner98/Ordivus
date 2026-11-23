@@ -123,7 +123,7 @@ Ohne die Operator-Policy `allowPrivilegedGrants: true` sind folgende Deklaration
 - Gruppen samt allen Unterrechten: `ACCESS MANAGEMENT` (u. a. `CREATE/ALTER/DROP USER`, `CREATE/ALTER/DROP ROLE`, `ROLE ADMIN`, Row Policies, Quotas, Settings-Profile, `SHOW ACCESS`), `SYSTEM` (alle `SYSTEM …`), `SOURCES`, `READ`/`WRITE` (Quellen), `INTROSPECTION`, `NAMED COLLECTION ADMIN` (u. a. `SHOW NAMED COLLECTIONS SECRETS`), `displaySecretsInShowAndSelect`, `KILL QUERY`, `KILL TRANSACTION`, `SET DEFINER`, `CLUSTER`, `TABLE ENGINE`, `MOVE PARTITION BETWEEN SHARDS`, `CREATE FUNCTION`, `DROP FUNCTION`.
 - Jedes direkte Unterrecht von `ALL` auf globaler Ebene, also alle Quellen wie `FILE`, `URL`, `REMOTE`, `S3`, `HDFS`, `MYSQL`, `POSTGRES`, `JDBC`, `KAFKA` … (auch künftige).
 - Jeder globale Grant (`*.*`, also ohne `database`), auch `SELECT`.
-- `DatabaseUser.roles`/`defaultRoles` mit einer Rolle, die (direkt oder über andere Rollen) einen privilegierten oder globalen Grant oder `WITH GRANT OPTION` trägt, oder die der Ordivus-Login selbst hat.
+- `DatabaseUser.roles`/`defaultRoles` mit einer Rolle, die (direkt oder über andere Rollen) einen privilegierten oder globalen Grant, einen Grant auf einer Systemdatenbank (`system`, `information_schema`/`INFORMATION_SCHEMA`) oder `WITH GRANT OPTION` trägt, oder die der Ordivus-Login selbst hat.
 
 Immer gesperrt, auch mit `allowPrivilegedGrants`: Grants an den Ordivus-Login und an seine Rollen, unbekannte Privilegien und alles außerhalb des Scopes (siehe unten). `WITH GRANT OPTION` modelliert der Adapter nicht.
 

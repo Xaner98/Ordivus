@@ -70,7 +70,13 @@ ROLES_QUERY = ("SELECT r.oid, r.rolname, r.rolcanlogin, r.rolsuper, r.rolconnlim
                "FROM pg_roles r")
 # Rechte, die eine Mitgliedschaft in ``%s`` (transitiv) mitbringt
 PRIVILEGED_QUERY = _chain("%s") + ("SELECT r.oid, r.rolname, r.rolsuper, r.rolcreaterole, r.rolreplication, "
-                                   "r.rolbypassrls, r.rolname = current_user FROM pg_roles r JOIN up USING (oid)")
+                                   "r.rolbypassrls, r.rolcanlogin, r.rolname = current_user "
+                                   "FROM pg_roles r JOIN up USING (oid)")
+# Grants, mit denen der Empfänger Code unter fremder Identität ausführen lassen kann (allowPrivilegedGrants):
+# TRIGGER: Trigger laufen als der Nutzer, der schreibt (z. B. ein Superuser) → Eskalation.
+# MAINTAIN (PG 17): VACUUM/ANALYZE/REINDEX führen Index- und Funktionsausdrücke aus.
+# CREATE auf Schema/Datenbank: Objekte im search_path fremder Rollen (bzw. ein Schema "$user") kapern deren Aufrufe.
+PRIVILEGED_GRANTS = {"database": {"CREATE"}, "schema": {"CREATE"}, "tables-in-schema": {"TRIGGER", "MAINTAIN"}}
 RESERVED_SCHEMAS = ("pg_catalog", "information_schema")
 
 
@@ -296,21 +302,29 @@ class PostgreSQLAdapter(Adapter):
         return target["endpoint"].get("tls", {}).get("mode", "prefer") != "verify-full"
 
     def check(self, session, resource, allow_privileged=False):
+        policy = "requires operator policy allowPrivilegedGrants"
+        if resource.kind == "Grant":
+            found = sorted(PRIVILEGED_GRANTS[resource.attrs["on"]] & set(resource.attrs["privileges"]))
+            if found and not allow_privileged:
+                return f"{', '.join(found)} on {resource.attrs['on']} is privileged; {policy}"
+            return None
         if resource.kind not in ROLE_KINDS:
             return None
-        policy = "requires operator policy allowPrivilegedGrants"
         if resource.attrs.get("createrole") and not allow_privileged:
             return f"createrole is privileged; {policy}"
         for parent in resource.attrs.get("memberOf", []):
+            if not _in_scope(session.target.get("scope"), "roles", parent):  # auch mit Freigabe nie
+                return f"memberOf {parent!r} is outside spec.scope.roles"
             if parent.startswith("pg_") and not allow_privileged:
                 return f"memberOf {parent!r}: predefined pg_* roles are privileged; {policy}"
             with _mapped():
                 rows = session.conn.execute(PRIVILEGED_QUERY, (parent,)).fetchall()
-            for oid, name, superuser, createrole, replication, bypassrls, me in rows:
+            for oid, name, superuser, createrole, replication, bypassrls, login, me in rows:
                 if me or oid == BOOTSTRAP_OID:  # auch mit Freigabe nie: Ordivus-Anmeldung, Bootstrap-Superuser
                     return f"memberOf {parent!r} would grant the role {name!r} (Ordivus login or bootstrap superuser)"
                 why = [w for w, on in (("SUPERUSER", superuser), ("CREATEROLE", createrole),
                                        ("REPLICATION", replication), ("BYPASSRLS", bypassrls),
+                                       ("LOGIN role", login),
                                        ("predefined pg_* role", name.startswith("pg_"))) if on]
                 if why and not allow_privileged:
                     return f"memberOf {parent!r} is privileged (via {name!r}: {', '.join(why)}); {policy}"

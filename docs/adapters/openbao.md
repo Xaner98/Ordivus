@@ -89,6 +89,26 @@ Achtung: Wer Policies schreiben darf, die anderen Identitäten zugeordnet sind, 
 indirekt Rechte vergeben. Policy-Namensbereich und Zuordnung (Auth-Rollen, Gruppen) getrennt
 kontrollieren; Break-Glass-Runbook bereithalten.
 
+## Privilegierte Policies (`allowPrivilegedGrants`)
+
+Ohne Operator Policy `allowPrivilegedGrants: true` ist eine `OpenBaoPolicy` `BLOCKED` (in `apply`
+Exit 11), wenn sie
+
+- irgendwo die Capability `sudo` vergibt,
+- einen Pfad unter `sys/` mit einer anderen Capability als `deny` erlaubt – auch über Muster, die
+  `sys/` treffen können: `*`, `s*`, `sy*`, `sys*`, `+/…` oder Templates wie `{{identity.entity.name}}/…`,
+- unter `auth/` oder `identity/` schreibt (`create`, `update`, `patch`, `delete`), z. B. Benutzer
+  einer Auth-Methode anlegen, Tokens erzeugen oder Entities/Gruppen ändern. Lesen (`read`, `list`)
+  bleibt erlaubt. Ausgenommen sind genau die Pfade `auth/token/renew-self`, `auth/token/revoke-self`
+  und `auth/token/lookup-self` mit `read`/`update`: sie wirken nur auf das eigene Token. Ein Muster wie
+  `auth/token/*` bleibt privilegiert.
+
+`spec.rules` wird exakt geprüft. Rohes HCL in `spec.policy` liest Ordivus konservativ: erlaubt sind
+nur Blöcke `path "…" { capabilities = [ "…", … ] }` und Kommentare (`#`, `//`, `/* */`). Alles andere
+(weitere Block-Parameter wie `allowed_parameters`, JSON-Syntax, unbekannte Escapes) kann Ordivus nicht
+sicher bewerten; die Policy gilt dann als privilegiert. Mit Namespaces (Pfade wie `ns1/sys/…`) rechnet
+die Prüfung nicht, da der Adapter nur den Root-Namespace verwaltet.
+
 ## Read-only
 
 `plan`/`drift` öffnen eine Read-only-Session; `apply` wird darin verweigert. Das ist nur eine

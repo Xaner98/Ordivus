@@ -466,3 +466,58 @@ def test_admin_roles_are_never_dropped(my):
     assert set(mutating(rep)) == {("DatabaseRole", f"{p}junk@%", "DELETE")}, rep["operations"]
     roles = {u for (u,) in sql("SELECT User FROM mysql.user")}
     assert {f"{p}adminrole", f"{p}inner"} <= roles and f"{p}junk" not in roles
+
+
+# --- Review 2: PAD SPACE, Rollenstärke, Login-Sperre ----------------------------------------------
+
+def test_whitespace_in_account_and_database_names_is_rejected():
+    a = MySQLAdapter()
+    cases = [doc("DatabaseUser", "u", identity={"username": "u"}, roles=["root "]),
+             doc("DatabaseUser", "u", identity={"username": "u"}, roles=[" root@%"]),
+             doc("DatabaseUser", "u", identity={"username": "u"}, roles=["x"], defaultRoles=["root @localhost"]),
+             doc("DatabaseUser", "u", identity={"username": "root "}),
+             doc("DatabaseRole", "r", identity={"username": "r", "host": "% "}),
+             doc("Grant", "g", grantee="root ", on="global", privileges=["SELECT"]),
+             doc("Grant", "g", grantee="x@ localhost", on="global", privileges=["SELECT"]),
+             doc("Grant", "g", grantee="x", on="database", database="mysql ", privileges=["SELECT"]),
+             doc("Grant", "g", grantee="x", on="table", database="d", table="t ", privileges=["SELECT"]),
+             doc("Database", "d", name=" d")]
+    for d in cases:
+        assert any("whitespace" in e for e in a.validate(d)), d
+
+
+def test_check_resolves_accounts_like_mysql(my):
+    """Auch ohne Validierung: check() vergleicht mit der mysql.user-Zeile, die MySQL selbst wählt (PAD SPACE)."""
+    a = MySQLAdapter()
+    with a.connect({"endpoint": ENDPOINT}, Secret(ROOT_PASSWORD), write=False) as session:
+        user = Resource("DatabaseUser", f"{my.prefix}u@%", {"roles": ["root @%"]})
+        assert "system account" in a.check(session, user, allow_privileged=True)
+        grant = Resource("Grant", "x", {"grantee": "root  @localhost", "on": "global", "privileges": ["SELECT"]})
+        assert "system account" in a.check(session, grant, allow_privileged=True)
+        assert "system account" in a.check(session, Resource("DatabaseRole", "root   @%"), allow_privileged=True)
+
+
+def test_roles_with_system_table_or_proxy_privileges_are_powerful(my):
+    p = my.prefix
+    sql("CREATE ROLE %s, %s, %s, %s", f"{p}tbl", f"{p}proxy", f"{p}wild", f"{p}plain")
+    sql("GRANT UPDATE ON mysql.user TO %s", f"{p}tbl")
+    sql("GRANT PROXY ON root@'%%' TO %s", f"{p}proxy")
+    sql("GRANT SELECT ON `m%%`.* TO %s", f"{p}wild")  # Wildcard-Muster trifft mysql
+    path = my(*[doc("DatabaseUser", k, targetRef="my", identity={"username": f"{p}u{k}"}, roles=[f"{p}{k}"],
+                    accountLocked=True) for k in ("tbl", "proxy", "wild", "plain")])
+    rep = run(path, "plan")
+    assert {o["id"] for o in rep["operations"] if o["action"] == "BLOCKED"} == {
+        f"{p}u{k}@%" for k in ("tbl", "proxy", "wild")}
+    assert not any(o["action"] == "BLOCKED" for o in run(path, "plan", allowPrivilegedGrants=True)["operations"])
+
+
+def test_verify_skips_when_another_host_row_has_login_locking(my):
+    p = my.prefix
+    sql("CREATE USER %s@'%%' IDENTIFIED BY 'right-password-3'", f"{p}two")
+    sql("CREATE USER %s@'127.0.0.1' IDENTIFIED BY 'right-password-4' FAILED_LOGIN_ATTEMPTS 1 PASSWORD_LOCK_TIME 1",
+        f"{p}two")
+    a = MySQLAdapter()
+    target = {"endpoint": ENDPOINT}
+    with a.connect(target, Secret(ROOT_PASSWORD), write=False) as session:
+        assert a.verify_password(session, target, Resource("DatabaseUser", f"{p}two@%"), Secret("stale-pw-1")) is None
+    assert can_login(f"{p}two", "right-password-4", host="127.0.0.1") or can_login(f"{p}two", "right-password-3")

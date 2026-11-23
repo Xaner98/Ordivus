@@ -332,7 +332,7 @@ class ClickHouseAdapter(Adapter):
             strong = {r["role_name"] for r in _post(
                 session, "SELECT role_name, access_type, database, grant_option FROM system.grants "
                          "WHERE role_name IS NOT NULL FORMAT JSON")
-                if r["database"] is None or r["grant_option"]
+                if r["database"] is None or r["database"] in GRANT_FORBIDDEN_DATABASES or r["grant_option"]
                 or self._privileged(session, r["access_type"]) is not False}
             powerful = {role for role in edges.keys() | strong if self._closure(edges, [role]) & strong}
             session.cache["roles"] = self._closure(edges, admin), powerful

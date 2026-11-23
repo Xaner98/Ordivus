@@ -566,7 +566,8 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy)
             if write and o.status == "planned":
                 o.status, o.reason = "skipped", "target aborted"
         return info, ops
-    info["status"] = report.target_status(mode, info["inventory"], ops)
+    info["status"] = report.target_status(mode, info["inventory"], ops,
+                                          (target.policy or {}).get("mode") == "authoritative")
     return info, ops
 
 

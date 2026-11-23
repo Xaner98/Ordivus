@@ -146,6 +146,9 @@ die deklarierten `commands` in Reihenfolge aus (wie Redis); erlauben sie danach 
 ist die Ressource ohne `allowPrivilegedGrants: true` `BLOCKED`. Das gilt für `+@all`/`allcommands`,
 `+@admin`, `+@dangerous`, einzelne Befehle wie `+config` und auch für Kategorien, die solche Befehle
 enthalten: `+@read` erlaubt `keys` und ist damit privilegiert, `+@read +@write -@dangerous` nicht.
+Eine Subcommand-Regel `+befehl|sub` ist privilegiert, sobald `befehl` privilegiert ist – auch wenn
+`ACL CAT` (wie bei Modulbefehlen, z. B. `ft.config`) nur den Befehl ohne Subcommands listet:
+`+ft.config|set`, `+config|set` und `+acl|setuser` sind ohne Freigabe `BLOCKED`.
 
 Gesperrt werden nur **hinzukommende** Rechte: Hat ein bestehender Benutzer einen privilegierten
 Befehl schon, blockiert dessen Beibehaltung nicht. Nicht deklarierte Admin-Benutzer bleiben

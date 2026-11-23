@@ -362,6 +362,16 @@ def test_roles_with_privileged_grants_need_operator_policy(cfg):
     assert blocked(rep) == {} and "oit_u" in names("users")
 
 
+def test_roles_with_system_database_grants_are_strong(cfg):
+    root("CREATE ROLE oit_sys")
+    root("GRANT SELECT ON system.* TO oit_sys")  # system.users, system.grants … lesbar
+    root("CREATE ROLE oit_info")
+    root("GRANT SELECT ON INFORMATION_SCHEMA.* TO oit_info")
+    path = cfg(user("oit_u1", roles=["oit_sys"]), user("oit_u2", roles=["oit_info"]))
+    assert set(blocked(run(path, "plan"))) == {"oit_u1", "oit_u2"}
+    assert blocked(run(path, "plan", allowPrivilegedGrants=True)) == {}
+
+
 def test_scope_limits_grants_and_databases(cfg):
     """C7: Grants/Datenbanken außerhalb scope.databases und globale Grants mit Scope werden gesperrt."""
     root("CREATE ROLE oit_r")

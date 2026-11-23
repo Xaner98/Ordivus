@@ -46,6 +46,69 @@ def canonical(text: str) -> str:
     return "\n".join(line.rstrip() for line in lines).strip("\n")
 
 
+# Ohne allowPrivilegedGrants gesperrt: sudo überall, jeder Pfad unter sys/, Schreibrechte unter auth/ und identity/
+WRITE = frozenset({"create", "update", "patch", "delete", "sudo"})
+GUARDED = (("sys/", None), ("auth/", WRITE), ("identity/", WRITE))  # (Präfix, Capabilities; None = alle)
+# wirken nur auf das eigene Token: exakt diese Pfade (kein Glob) mit read/update sind nicht privilegiert
+SELF_TOKEN = frozenset({"auth/token/renew-self", "auth/token/revoke-self", "auth/token/lookup-self"})
+# Konservativer HCL-Parser: nur ``path "…" { capabilities = [...] }`` und Kommentare; alles andere = unklar
+STRING = r'"(?:[^"\\\n]|\\.)*"'
+HCL_BLOCK = re.compile(r"path\s+(" + STRING + r")\s*\{\s*capabilities\s*=\s*\[([^\]]*)\]\s*\}")
+HCL_COMMENT = re.compile(STRING + r"|(?:#|//)[^\n]*|/\*.*?\*/", re.S)  # Strings zuerst: "#" darin ist kein Kommentar
+HCL_CAPS = re.compile(r'\s*"([a-z_]+)"\s*(,\s*"([a-z_]+)"\s*)*,?\s*')
+
+
+def may_match(pattern: str, prefix: str) -> bool:
+    """Ob der Policy-Pfad ``pattern`` (``*`` am Ende, ``+`` = ein Segment) einen Pfad unter ``prefix`` trifft."""
+    i = 0
+    for ch in pattern:
+        if i == len(prefix) or ch == "*":
+            return True
+        if ch == "+":
+            i = prefix.find("/", i)  # Segment-Wildcard: bis zum nächsten / im Präfix
+            if i == -1:
+                return True
+            continue
+        if ch != prefix[i]:
+            return False
+        i += 1
+    return i == len(prefix)
+
+
+def parse(text: str) -> list[tuple[str, list[str]]] | None:
+    """[(Pfad, Capabilities)] oder None, wenn der Text nicht sicher verstanden wird (dann gilt er als privilegiert)."""
+    rest = HCL_COMMENT.sub(lambda m: m.group(0) if m.group(0).startswith('"') else " ", text)
+    rules = []
+    for m in HCL_BLOCK.finditer(rest):
+        try:
+            path = json.loads(m.group(1))
+        except ValueError:  # HCL-Escape, das JSON nicht kennt
+            return None
+        if not HCL_CAPS.fullmatch(m.group(2)):
+            return None
+        rules.append((path, re.findall(r'"([a-z_]+)"', m.group(2))))
+    return rules if HCL_BLOCK.sub("", rest).strip() == "" else None
+
+
+def privileged(text: str) -> str | None:
+    """Grund, warum die Policy privilegiert ist, sonst None."""
+    rules = parse(text)
+    if rules is None:
+        return "policy text is not plain 'path \"...\" { capabilities = [...] }' blocks and cannot be checked"
+    for path, caps in rules:
+        if "sudo" in caps:
+            return f"path {path!r} grants sudo"
+        # Templates ({{identity.entity.name}} …) können zu beliebigen Segmenten werden: wie * behandeln
+        pattern = re.sub(r"\{\{.*?\}\}", "*", path).lstrip("/")
+        grants = set(caps) - {"deny"}
+        if pattern in SELF_TOKEN and grants <= {"read", "update"}:
+            continue
+        for prefix, guarded in GUARDED:
+            if may_match(pattern, prefix) and grants & (guarded or grants):
+                return f"path {path!r} may match {prefix}* with {sorted(grants)}"
+    return None
+
+
 def render(rules: list[dict]) -> str:
     """HCL aus ``rules``: Pfade in deklarierter Reihenfolge, Capabilities sortiert und dedupliziert."""
     return "\n\n".join(
@@ -117,7 +180,11 @@ class OpenBaoAdapter(Adapter):
 
     def check(self, session, resource, allow_privileged=False):
         # auch noch nicht existierende geschützte Namen schon im Plan sperren, nicht erst beim Schreiben
-        return f"policy {resource.id!r} is protected" if normalize(resource.id) in session.protected else None
+        if normalize(resource.id) in session.protected:
+            return f"policy {resource.id!r} is protected"
+        if not allow_privileged and (why := privileged(resource.attrs["policy"])):
+            return f"privileged policy ({why}) requires operator policy allowPrivilegedGrants"
+        return None
 
     @contextmanager
     def connect(self, target, secret, write):

@@ -178,11 +178,11 @@ def test_identifier_injection_is_safe(pg):
         doc("Database", "d", name=db, owner=user),
         doc("Grant", "g", grantee=role, database=db, on="database", privileges=["CONNECT"]),
         doc("Grant", "s", grantee=user, database=db, on="schema", schema="public", privileges=["CREATE", "USAGE"]))
-    first = run(path, "apply")
+    first = run(path, "apply", allowPrivilegedGrants=True)  # CREATE auf Schema ist privilegiert
     assert report.exit_code(first) == 0, first["operations"]
     assert pg.objects() == sorted([db, role, user])
     assert pg.admin.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'postgres'").fetchone() == (1,)
-    second = run(path, "apply")
+    second = run(path, "apply", allowPrivilegedGrants=True)
     assert [o for o in second["operations"] if o["action"] in MUTATING] == []
 
 
@@ -327,7 +327,7 @@ def test_privileged_membership_is_blocked_unless_policy_allows(pg):
     def blocked(rep):
         return {o["id"] for o in rep["operations"] if o["action"] == "BLOCKED"}
 
-    path = pg.cfg(*docs)
+    path = pg.cfg(*docs, scoped=False)  # mit roles-Scope wären pg_*/postgres schon außerhalb
     rep = run(path, "apply")
     assert blocked(rep) == {p + k for k in ("bootstrap", "server_program", "via_mid", "creator", "attr")}
     assert report.exit_code(rep) == 11
@@ -355,3 +355,42 @@ def test_roles_of_the_admin_login_are_system(pg):
     ops = {o["id"]: o["action"] for o in rep["operations"] if o["kind"] == "DatabaseRole"}
     assert ops == {p + "grp": "BLOCKED", p + "other": "DELETE"}  # outer: IGNORE (nicht im Report)
     assert report.exit_code(rep) == 0
+
+
+def test_escalating_grants_need_policy(pg):
+    """TRIGGER/MAINTAIN führen Code als fremde (z. B. Superuser-)Sitzung aus; CREATE kapert den search_path."""
+    p = pg.p
+    pg.sql("CREATE DATABASE {}", p + "db")
+    grants = {"trigger": ("tables-in-schema", ["TRIGGER", "SELECT"]), "maintain": ("tables-in-schema", ["MAINTAIN"]),
+              "schema": ("schema", ["CREATE"]), "database": ("database", ["CREATE"]),
+              "plain": ("tables-in-schema", ["SELECT", "INSERT"])}
+    for k in grants:
+        pg.sql("CREATE ROLE {} NOLOGIN", p + k)
+    path = pg.cfg(*[doc("Grant", k, grantee=p + k, database=p + "db", on=on, privileges=privs,
+                        **({} if on == "database" else {"schema": "public"})) for k, (on, privs) in grants.items()])
+
+    def blocked(rep):
+        return {json.loads(o["id"])[0] for o in rep["operations"] if o["action"] == "BLOCKED"}
+
+    assert blocked(run(path, "plan")) == {p + k for k in ("trigger", "maintain", "schema", "database")}
+    assert blocked(run(path, "plan", allowPrivilegedGrants=True)) == set()
+
+
+def test_membership_in_login_roles_or_outside_scope(pg):
+    p = pg.p
+    pg.sql("CREATE ROLE {} LOGIN", p + "other_login")
+    pg.sql("CREATE ROLE {} NOLOGIN", p + "group")
+    pg.sql("CREATE ROLE {} NOLOGIN", "oit_outside_" + p)
+    try:
+        path = pg.cfg(doc("DatabaseUser", "a", name=p + "a", memberOf=[p + "other_login"]),
+                      doc("DatabaseUser", "b", name=p + "b", memberOf=["oit_outside_" + p]),
+                      doc("DatabaseUser", "c", name=p + "c", memberOf=[p + "group"]))
+
+        def reasons(rep):
+            return {o["id"]: o.get("reason", "") for o in rep["operations"] if o["action"] == "BLOCKED"}
+
+        assert set(reasons(run(path, "plan"))) == {p + "a", p + "b"}
+        allowed = reasons(run(path, "plan", allowPrivilegedGrants=True))
+        assert set(allowed) == {p + "b"} and "outside spec.scope.roles" in allowed[p + "b"]
+    finally:
+        pg.sql("DROP ROLE {}", "oit_outside_" + p)

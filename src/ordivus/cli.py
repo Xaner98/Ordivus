@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import stat
 import sys
 import traceback
 from collections import Counter
@@ -67,17 +68,31 @@ def _run(args) -> ExitCode:
     finally:
         logger.removeHandler(handler)
     text = (report.render_json if args.format == "json" else report.render_human)(result) + "\n"
-    if args.output:  # 0600 und kein Symlink: der Report kann Rechte- und Inventardetails enthalten
-        try:
-            fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-        except OSError as e:
-            print(f"cannot write report to {args.output}: {e.strerror}", file=sys.stderr)
-            return ExitCode.INTERNAL
-    else:
+    code = ExitCode(report.exit_code(result, args.fail_on))
+    if not args.output:
         sys.stdout.write(text)
-    return ExitCode(report.exit_code(result, args.fail_on))
+    elif error := _write_private(args.output, text):
+        # Exit-Code des Laufs bleibt (apply hat ggf. schon geändert); nur ein sonst grüner Lauf wird zu 1
+        print(f"cannot write report to {args.output}: {error}", file=sys.stderr)
+        return code or ExitCode.INTERNAL
+    return code
+
+
+def _write_private(path: str, text: str) -> str | None:
+    """Report mit 0600 schreiben; kein Symlink, und eine vorhandene Datei nur, wenn sie eine reguläre Datei
+    des aktuellen Nutzers ist (der Report kann Rechte- und Inventardetails enthalten). Fehlertext oder None."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                return "not a regular file owned by the current user"
+            os.fchmod(fd, 0o600)
+            f.truncate(0)
+            f.write(text)
+    except OSError as e:
+        return e.strerror or type(e).__name__
+    return None
 
 
 def _parser() -> argparse.ArgumentParser:

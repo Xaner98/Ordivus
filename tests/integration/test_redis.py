@@ -252,6 +252,9 @@ def test_persist_without_config_file_fails_before_changes(cfg, client):
     (["+@all"], True), (["allcommands", "-flushall"], True), (["+@admin"], True), (["+@dangerous"], True),
     (["+config|set"], True), (["+config"], True), (["+acl"], True), (["+module"], True), (["+debug"], True),
     (["+shutdown"], True), (["+@read"], True),  # @read enthält KEYS (@dangerous)
+    (["+acl|setuser"], True), (["+client|kill"], True), (["+module|load"], True),
+    (["+ft.config|set"], True), (["+FT.CONFIG|SET"], True),  # Modul-Parent: ACL CAT listet keine Subcommands
+    (["+@read", "-@dangerous", "+ft.config|set"], True), (["+ft.search"], False),
     (["+@read", "+@write", "-@dangerous"], False), (["+get", "+set", "+ping"], False),
     (["+@all", "-@admin", "-@dangerous"], False), (["+config", "-config"], False), (["nocommands"], False),
 ])
