@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ordivus
+description: Suspended Ordivus job templates (plan, drift, apply) for runs without a Helm upgrade per run.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

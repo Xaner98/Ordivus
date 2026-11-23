@@ -1,0 +1,92 @@
+# ClickHouse: Reporting-Datenbank mit Lese-Rolle und einem Anwendungsbenutzer.
+# Prüfen ohne Verbindung: ordivus config validate -f examples/clickhouse
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: local-secrets
+spec:
+  type: file
+  directory: /var/run/secrets/ordivus
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: clickhouse-admin
+spec:
+  providerRef: local-secrets
+  path: clickhouse-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: reporting-app-password
+spec:
+  providerRef: local-secrets
+  path: reporting-app
+  lifecycle:
+    generator:
+      length: 40
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: analytics-clickhouse
+spec:
+  adapter: clickhouse
+  endpoint:
+    host: clickhouse.data-platform.svc.cluster.local
+    port: 8443
+    user: ordivus
+    tls:
+      caFile: /trust/ca.pem
+  authentication:
+    credentialRef: clickhouse-admin
+  scope:
+    databases:
+      include: ["reporting*"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: analytics-governance
+spec:
+  targetRef: analytics-clickhouse
+  mode: additive
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Database
+metadata:
+  name: reporting
+spec:
+  targetRef: analytics-clickhouse
+  engine: Atomic
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseRole
+metadata:
+  name: reporting_reader
+spec:
+  targetRef: analytics-clickhouse
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Grant
+metadata:
+  name: reporting-reader-select
+spec:
+  targetRef: analytics-clickhouse
+  grantee: reporting_reader
+  database: reporting
+  privileges: [SELECT, SHOW TABLES]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: reporting_app
+spec:
+  targetRef: analytics-clickhouse
+  roles: [reporting_reader]
+  defaultRoles: [reporting_reader]
+  hostIp: ["10.0.0.0/8"]
+  credentials:
+    credentialRef: reporting-app-password
+    passwordPolicy: verify

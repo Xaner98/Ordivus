@@ -1,0 +1,43 @@
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: cache-redis
+spec:
+  adapter: redis
+  endpoint:
+    host: redis.cache.svc.cluster.local
+    port: 6379
+    tls:
+      caFile: /trust/ca.pem
+  username: ordivus-admin
+  persist: aclSave
+  authentication:
+    credentialRef: redis-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: local-files
+spec:
+  type: file
+  directory: /var/run/ordivus/secrets
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: redis-admin
+spec:
+  providerRef: local-files
+  path: redis-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: cache-redis-governance
+spec:
+  targetRef: cache-redis
+  mode: authoritative
+  scope:
+    resourceKinds: [DatabaseUser]
+    DatabaseUser:
+      glob: ["app-*"]

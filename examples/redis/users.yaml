@@ -1,0 +1,31 @@
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: app-sessions-password
+spec:
+  providerRef: local-files
+  path: app-sessions
+  lifecycle:
+    generator:
+      length: 40
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: app-sessions
+spec:
+  targetRef: cache-redis
+  credentials:
+    credentialRef: app-sessions-password
+    passwordPolicy: verify
+  keys: ["session:*", "%R~config:*"]
+  channels: ["session-events"]
+  commands: ["+@read", "+@write", "-@dangerous", "+ping"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: app-legacy
+spec:
+  targetRef: cache-redis
+  enabled: false

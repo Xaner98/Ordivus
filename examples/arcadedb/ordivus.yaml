@@ -1,0 +1,92 @@
+# ArcadeDB: Graph-Datenbank für das Analytics-Team, ein Schreib- und ein Lese-Benutzer.
+# Admin-Passwort (root) und Benutzerpasswörter liegen als Dateien in /var/run/ordivus/secrets.
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: files
+spec:
+  type: file
+  directory: /var/run/ordivus/secrets
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: arcadedb-root
+spec:
+  providerRef: files
+  path: arcadedb-root
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: graph-writer-password
+spec:
+  providerRef: files
+  path: graph-writer
+  lifecycle:
+    generator:
+      length: 32
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: graph-reader-password
+spec:
+  providerRef: files
+  path: graph-reader
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: analytics-arcadedb
+spec:
+  adapter: arcadedb
+  endpoint:
+    host: arcadedb.data-platform.svc.cluster.local
+    port: 2480
+    tls:
+      caFile: /trust/ca.pem
+  username: root
+  authentication:
+    credentialRef: arcadedb-root
+  scope:
+    users:
+      include: ["graph_*"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: analytics-arcadedb-policy
+spec:
+  targetRef: analytics-arcadedb
+  mode: additive
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Database
+metadata:
+  name: knowledge_graph
+spec:
+  targetRef: analytics-arcadedb
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: graph_writer
+spec:
+  targetRef: analytics-arcadedb
+  databases:
+    knowledge_graph: [crud]
+  credentials:
+    credentialRef: graph-writer-password
+    passwordPolicy: verify
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: graph_reader
+spec:
+  targetRef: analytics-arcadedb
+  databases:
+    knowledge_graph: [readonly]
+  credentials:
+    credentialRef: graph-reader-password

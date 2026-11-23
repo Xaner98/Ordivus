@@ -1,0 +1,87 @@
+# Ordivus Helm Chart. Doku: docs/kubernetes.md
+
+image:
+  repository: ghcr.io/EXAMPLE/ordivus
+  tag: ""          # Standard: appVersion
+  digest: ""       # "sha256:..." hat Vorrang vor tag (empfohlen, im Profil hardened Pflicht)
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Ordivus-Konfiguration, read-only unter /config.
+configuration:
+  source: configMap                 # configMap: vorhandene ConfigMap; inline: Chart erzeugt sie aus files
+  name: ordivus-configuration       # nur bei source=configMap
+  files: {}                         # nur bei source=inline: Dateiname -> Inhalt (YAML-String)
+
+# Operator Policy, getrennt von der Konfiguration, read-only unter /policy.
+# --policy wird nur übergeben, wenn configMap oder secret gesetzt ist.
+policy:
+  configMap: ""
+  secret: ""
+  key: policy.yaml
+
+# Credentials-Verzeichnis (für CredentialProvider type=file). Volume-Quelle je Modus getrennt,
+# damit plan/drift keine Apply-Credentials sehen.
+credentials:
+  mountPath: /var/run/secrets/ordivus
+  readOnly: {}   # plan/drift, z. B. {secret: {secretName: ordivus-readonly-credentials}}
+  apply: {}      # apply,      z. B. {secret: {secretName: ordivus-apply-credentials}}
+
+jobs:
+  # Suspendierte Vorlagen; Start per kubectl create job --from=cronjob/<release>-<mode> (scripts/run-job.sh).
+  templates:
+    plan:  &template
+      enabled: true
+      suspended: true
+      schedule: "0 0 1 1 *"         # Pflichtfeld, wirkungslos solange suspended
+      automountServiceAccountToken: false
+      # Projiziertes, audience-gebundenes SA-Token, z. B. für OpenBao Kubernetes Auth.
+      projectedToken:
+        enabled: false
+        audience: openbao
+        expirationSeconds: 600
+        mountPath: /var/run/secrets/tokens
+      extraArgs: []
+    drift: *template
+    apply: *template
+  # Optionaler, NICHT suspendierter Drift-CronJob mit Zeitplan.
+  scheduledDrift:
+    enabled: false
+    schedule: "0 2 * * *"
+    automountServiceAccountToken: false
+    projectedToken:
+      enabled: false
+      audience: openbao
+      expirationSeconds: 600
+      mountPath: /var/run/secrets/tokens
+    extraArgs: []
+
+security:
+  profile: standard                 # development | standard | hardened (hardened erzwingt digest, policy, networkPolicy)
+  createServiceAccounts: true
+  readOnlyServiceAccount: ordivus-readonly   # plan, drift, scheduledDrift
+  applyServiceAccount: ordivus-apply         # apply
+  serviceAccountAnnotations: {}
+  networkPolicy:
+    enabled: false
+    # Erlaubter Egress zusätzlich zu DNS (kube-system, Port 53).
+    egress: []
+    #  - cidr: 10.20.0.0/16
+    #    ports: [5432, 8200]
+
+execution:
+  timeoutSeconds: 1800              # activeDeadlineSeconds
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  terminationGracePeriodSeconds: 30
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: 1000m, memory: 512Mi}
+
+env: []
+extraVolumes: []
+extraVolumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}

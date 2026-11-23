@@ -1,0 +1,31 @@
+{{- if .Values.security.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "ordivus.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ordivus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- range .Values.security.networkPolicy.egress }}
+    - to:
+        - ipBlock: {cidr: {{ required "networkPolicy.egress[].cidr is required" .cidr | quote }}}
+      {{- with .ports }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+{{- end }}

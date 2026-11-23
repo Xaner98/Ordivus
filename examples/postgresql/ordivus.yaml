@@ -1,0 +1,123 @@
+# Beispiel: Analytics-Datenbank mit Leserolle, Anwendungsuser und Grants.
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: analytics-postgres
+spec:
+  adapter: postgresql
+  endpoint:
+    host: postgres.data-platform.svc.cluster.local
+    port: 5432
+    database: postgres
+    user: ordivus_admin
+    tls:
+      mode: verify-full
+      caFile: /trust/ca.pem
+  authentication:
+    credentialRef: postgres-admin
+  scope:
+    databases:
+      include: ["analytics"]
+    roles:
+      include: ["analytics_*"]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: local-secrets
+spec:
+  type: file
+  directory: /var/run/secrets/ordivus
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: postgres-admin
+spec:
+  providerRef: local-secrets
+  path: postgres-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: analytics-app-password
+spec:
+  providerRef: local-secrets
+  path: analytics-app
+  lifecycle:
+    generator:
+      length: 40
+      alphabet: alphanumeric-symbol-safe
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseRole
+metadata:
+  name: analytics-readonly
+spec:
+  targetRef: analytics-postgres
+  name: analytics_readonly
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: DatabaseUser
+metadata:
+  name: analytics-app
+spec:
+  targetRef: analytics-postgres
+  name: analytics_app
+  memberOf: [analytics_readonly]
+  connectionLimit: 20
+  credentials:
+    credentialRef: analytics-app-password
+    passwordPolicy: verify
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Database
+metadata:
+  name: analytics
+spec:
+  targetRef: analytics-postgres
+  owner: analytics_app
+  encoding: UTF8
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Grant
+metadata:
+  name: analytics-readonly-connect
+spec:
+  targetRef: analytics-postgres
+  grantee: analytics_readonly
+  database: analytics
+  on: database
+  privileges: [CONNECT]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Grant
+metadata:
+  name: analytics-readonly-schema
+spec:
+  targetRef: analytics-postgres
+  grantee: analytics_readonly
+  database: analytics
+  on: schema
+  schema: public
+  privileges: [USAGE]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Grant
+metadata:
+  name: analytics-readonly-tables
+spec:
+  targetRef: analytics-postgres
+  grantee: analytics_readonly
+  database: analytics
+  on: tables-in-schema
+  schema: public
+  privileges: [SELECT]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: ReconciliationPolicy
+metadata:
+  name: analytics-governance
+spec:
+  targetRef: analytics-postgres
+  mode: additive

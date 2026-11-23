@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ordivus.adapters.base import Secret
 from ordivus.credentials.base import ABSENT, PRESENT, UNKNOWN, CredentialError, CredentialProvider
+from ordivus.credentials.openbao import OpenBaoKV2Provider
 
 log = logging.getLogger("ordivus")
 
@@ -82,4 +83,4 @@ class EnvProvider(CredentialProvider):
         return Secret(os.environ[ref["path"]])
 
 
-PROVIDERS: dict[str, type[CredentialProvider]] = {p.type: p for p in (FileProvider, EnvProvider)}
+PROVIDERS: dict[str, type[CredentialProvider]] = {p.type: p for p in (FileProvider, EnvProvider, OpenBaoKV2Provider)}

@@ -1,0 +1,101 @@
+# OpenBao in zwei getrennten Rollen:
+#  1. Credential Provider (KV v2) für das Passwort eines verwalteten Benutzers (Fake-Adapter als Platzhalter)
+#  2. Zielsystem für ACL-Policies (Adapter "openbao") mit eigenem Admin-Token aus einer Datei
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: central-openbao
+spec:
+  type: openbao-kv-v2
+  endpoint: https://openbao.internal.example:8200
+  mount: secret
+  tls:
+    caFile: /etc/ordivus/openbao-ca.pem
+  auth:
+    method: kubernetes
+    role: ordivus-apply
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: reporting-password
+spec:
+  providerRef: central-openbao
+  path: tenants/acme/reporting
+  lifecycle:
+    generator:
+      length: 40
+      alphabet: alphanumeric-symbol-safe
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: demo-db
+spec:
+  adapter: fake
+  instance: demo
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: FakeUser
+metadata:
+  name: reporting
+spec:
+  targetRef: demo-db
+  credentials:
+    credentialRef: reporting-password
+---
+# Getrennte Identität für die Policy-Verwaltung: Token kommt aus einer gemounteten Datei.
+apiVersion: ordivus.dev/v1alpha1
+kind: CredentialProvider
+metadata:
+  name: mounted
+spec:
+  type: file
+  directory: /var/run/secrets/ordivus
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Credential
+metadata:
+  name: openbao-policy-admin
+spec:
+  providerRef: mounted
+  path: openbao-policy-admin-token
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: Target
+metadata:
+  name: security-openbao
+spec:
+  adapter: openbao
+  endpoint:
+    url: https://openbao.internal.example:8200
+  tls:
+    caFile: /etc/ordivus/openbao-ca.pem
+  protectedPolicies: [break-glass, ordivus-readonly, ordivus-apply]
+  authentication:
+    credentialRef: openbao-policy-admin
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: OpenBaoPolicy
+metadata:
+  name: analytics-readonly
+spec:
+  targetRef: security-openbao
+  policyName: analytics-readonly
+  rules:
+    - path: secret/data/analytics/*
+      capabilities: [read]
+    - path: secret/metadata/analytics/*
+      capabilities: [read, list]
+---
+apiVersion: ordivus.dev/v1alpha1
+kind: OpenBaoPolicy
+metadata:
+  name: analytics-writer
+spec:
+  targetRef: security-openbao
+  policyName: analytics-writer
+  policy: |
+    path "secret/data/analytics/*" {
+      capabilities = ["create", "read", "update"]
+    }
