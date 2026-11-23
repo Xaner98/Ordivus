@@ -1,12 +1,14 @@
 """Dünne CLI: parst Argumente, ruft ordivus.core, formatiert Ausgabe (Report stdout, Diagnose stderr)."""
 
 import argparse
+import json
+import logging
 import sys
 from collections import Counter
 from enum import IntEnum
 from importlib.metadata import version
 
-from ordivus.core import config
+from ordivus.core import config, engine, policy, report
 
 
 class ExitCode(IntEnum):
@@ -26,6 +28,7 @@ class ExitCode(IntEnum):
 def _validate(args) -> ExitCode:
     try:
         docs = config.load(args.file)
+        engine.prepare(docs)
     except config.ConfigError as e:
         for line in e.errors:
             print(line, file=sys.stderr)
@@ -37,9 +40,36 @@ def _validate(args) -> ExitCode:
     return ExitCode.OK
 
 
-def _not_implemented(args) -> ExitCode:
-    print(f"ordivus {args.command}: not implemented", file=sys.stderr)
-    return ExitCode.INTERNAL
+class _JsonLog(logging.Formatter):
+    def format(self, record):
+        return json.dumps({"type": "log", "level": record.levelname.lower(), "message": record.getMessage()})
+
+
+def _run(args) -> ExitCode:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_JsonLog() if args.format == "json" else logging.Formatter("%(levelname)s: %(message)s"))
+    logger = logging.getLogger("ordivus")
+    logger.addHandler(handler)
+    try:
+        docs = config.load(args.file)
+        operator = policy.load(args.policy) if args.policy else policy.OperatorPolicy()
+        result = engine.run(args.command, docs, operator, args.target)
+    except config.ConfigError as e:
+        for line in e.errors:
+            logger.error("%s", line)
+        return ExitCode.CONFIG
+    except policy.PolicyError as e:
+        logger.error("policy: %s", e)
+        return ExitCode.POLICY
+    finally:
+        logger.removeHandler(handler)
+    text = (report.render_json if args.format == "json" else report.render_human)(result) + "\n"
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(text)
+    else:
+        sys.stdout.write(text)
+    return ExitCode(report.exit_code(result, args.fail_on))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -57,7 +87,14 @@ def _parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name)
         sub.add_argument("-f", "--file", required=True, help="config file or directory")
         sub.add_argument("--format", choices=["human", "json"], default="human")
-        sub.set_defaults(handler=_not_implemented)
+        sub.add_argument("--policy", help="operator security policy file (YAML or JSON)")
+        sub.add_argument("--output", help="write the report to FILE instead of stdout")
+        sub.add_argument("--target", action="append", help="only this target (repeatable)")
+        if name == "drift":
+            sub.add_argument("--fail-on", choices=["actionable", "unmanaged", "any"])
+        elif name == "plan":
+            sub.add_argument("--fail-on", choices=["changes"])
+        sub.set_defaults(handler=_run, fail_on=None)
     return parser
 
 

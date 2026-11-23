@@ -9,11 +9,10 @@ from pathlib import Path
 
 import yaml
 
+from ordivus import adapters
+
 API_VERSION = "ordivus.dev/v1alpha1"
-KINDS = frozenset({
-    "Target", "CredentialProvider", "Credential", "DatabaseUser", "DatabaseRole",
-    "Database", "Grant", "ReconciliationPolicy", "OpenBaoPolicy",
-})
+ENGINE_KINDS = frozenset({"Target", "CredentialProvider", "Credential", "ReconciliationPolicy"})
 TOP_LEVEL_FIELDS = frozenset({"apiVersion", "kind", "metadata", "spec"})
 SUFFIXES = (".yaml", ".yml", ".json")
 MAX_FILE_BYTES = 1024 * 1024
@@ -118,7 +117,7 @@ def _parse_file(path: Path) -> list[Document]:
     return [d for d in docs if d.data is not None]  # leere Dokumente (z. B. trailing ---)
 
 
-def _check(doc: Document) -> list[str]:
+def _check(doc: Document, kinds: frozenset[str]) -> list[str]:
     where = f"{doc.path}:{doc.line}"
     data = doc.data
     if not isinstance(data, dict):
@@ -126,7 +125,7 @@ def _check(doc: Document) -> list[str]:
     errors = [f"{where}: unknown top-level field {k!r}" for k in data if k not in TOP_LEVEL_FIELDS]
     if data.get("apiVersion") != API_VERSION:
         errors.append(f"{where}: apiVersion must be {API_VERSION!r}, got {data.get('apiVersion')!r}")
-    if data.get("kind") not in KINDS:
+    if data.get("kind") not in kinds:
         errors.append(f"{where}: unknown or missing kind {data.get('kind')!r}")
     metadata = data.get("metadata")
     name = metadata.get("name") if isinstance(metadata, dict) else None
@@ -135,8 +134,13 @@ def _check(doc: Document) -> list[str]:
     return errors
 
 
-def load(path: str | Path) -> list[Document]:
-    """Lädt Datei oder Verzeichnis; wirft ConfigError mit allen gefundenen Fehlern."""
+def load(path: str | Path, kinds: frozenset[str] | None = None) -> list[Document]:
+    """Lädt Datei oder Verzeichnis; wirft ConfigError mit allen gefundenen Fehlern.
+
+    `kinds`: erlaubte Kinds; Default sind Engine-Kinds plus Kinds aller registrierten Adapter.
+    """
+    if kinds is None:
+        kinds = ENGINE_KINDS | adapters.all_kinds()
     path = Path(path)
     if not path.exists():
         raise ConfigError([f"{path}: no such file or directory"])
@@ -148,7 +152,7 @@ def load(path: str | Path) -> list[Document]:
             errors.extend(e.errors)
     valid = []
     for doc in docs:
-        problems = _check(doc)
+        problems = _check(doc, kinds)
         errors.extend(problems)
         if not problems:
             valid.append(doc)
@@ -172,3 +176,8 @@ def digest(docs: list[Document]) -> str:
     ordered = [d.data for d in sorted(docs, key=lambda d: (d.kind, d.name))]
     canonical = json.dumps(ordered, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def read_documents(path: str | Path) -> list:
+    """Rohdaten aller Dokumente einer YAML/JSON-Datei ohne Schema-Prüfung (z. B. Operator-Policy)."""
+    return [d.data for d in _parse_file(Path(path))]

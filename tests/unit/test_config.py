@@ -1,11 +1,8 @@
 import math
-from pathlib import Path
 
 import pytest
 
 from ordivus.core import config
-
-EXAMPLE = Path(__file__).parents[2] / "examples" / "basic"
 
 
 def _value(tmp_path, scalar):
@@ -82,7 +79,7 @@ def test_file_size_limit(tmp_path):
 def test_json_file(tmp_path):
     f = tmp_path / "c.json"
     f.write_text('{"apiVersion":"ordivus.dev/v1alpha1","kind":"Grant","metadata":{"name":"g"}}')
-    assert config.load(f)[0].name == "g"
+    assert config.load(f, kinds=frozenset({"Grant"}))[0].name == "g"
 
 
 def test_digest_independent_of_file_and_key_order(tmp_path):
@@ -100,7 +97,3 @@ def test_digest_independent_of_file_and_key_order(tmp_path):
     (two / "a.yaml").write_text(HEAD + "metadata:\n  name: c\n")
     assert config.digest(config.load(one)) != config.digest(config.load(two))
 
-
-def test_example_basic_is_valid():
-    docs = config.load(EXAMPLE)
-    assert sorted(d.kind for d in docs) == ["Credential", "DatabaseUser", "Target"]

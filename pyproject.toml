@@ -12,10 +12,24 @@ requires-python = ">=3.13"
 dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
+postgresql = ["psycopg[binary]>=3.2"]
+mysql = ["PyMySQL>=1.1"]
+redis = ["redis>=5.0"]
+# clickhouse, arcadedb, openbao: HTTP via standard library, no extra needed
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 ordivus = "ordivus.cli:main"
+
+# Adapter-Plugins (§9.6); externe Pakete registrieren sich in derselben Gruppe.
+[project.entry-points."ordivus.adapters"]
+fake = "ordivus.adapters.fake:FakeAdapter"
+postgresql = "ordivus.adapters.postgresql:PostgreSQLAdapter"
+mysql = "ordivus.adapters.mysql:MySQLAdapter"
+clickhouse = "ordivus.adapters.clickhouse:ClickHouseAdapter"
+arcadedb = "ordivus.adapters.arcadedb:ArcadeDBAdapter"
+redis = "ordivus.adapters.redis:RedisAdapter"
+openbao = "ordivus.adapters.openbao:OpenBaoAdapter"
 
 [tool.setuptools.packages.find]
 where = ["src"]
