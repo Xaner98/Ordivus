@@ -104,5 +104,6 @@ otherwise every missing secret stays `unknown`.
 
 - KV v2 only, field `password` only, no multi-field documents.
 - No token renewal, no lease handling.
-- No retry; network errors are `unknown` or abort the target.
+- Reads (GET) are retried up to 3 times on network errors (not on TLS errors); writes are never retried. Remaining errors are `unknown` or abort the target. The reason names the underlying cause
+  (e.g. a TLS certificate verification error), never the token.
 - The reason for `unknown`/`conflict` is shown as `reason` on the credential op in the report.

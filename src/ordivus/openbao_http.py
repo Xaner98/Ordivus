@@ -37,7 +37,9 @@ def request(url: str, method: str, path: str, token: str | None = None, body: di
             break
         except (OSError, ValueError) as e:  # URLError, Timeout, TLS-Fehler, ungültige URL
             if attempt == RETRIES - 1 or method != "GET" or isinstance(e, ValueError | ssl.SSLError):
-                raise TransientError(f"openbao {method} {path}: {type(e).__name__}") from None
+                # Grund statt nur "URLError" (z. B. Zertifikatsfehler); das Token steht nur im Header, nie hier
+                reason = e.reason if isinstance(e, urllib.error.URLError) else e
+                raise TransientError(f"openbao {method} {path}: {type(e).__name__}: {str(reason)[:300]}") from None
             time.sleep(0.2 * (attempt + 1))
     try:
         body = json.loads(raw) if raw else {}

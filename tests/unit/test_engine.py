@@ -333,3 +333,94 @@ def test_insecure_transport_warns_or_is_refused(cfg, fake, monkeypatch, tmp_path
     strict.write_text("requireTls: true\n")
     assert main(["apply", "-f", str(path), "--policy", str(strict)]) == ExitCode.POLICY
     assert fake.calls == []
+
+
+def test_verification_discovers_each_kind_once(cfg, fake, monkeypatch):
+    seen = []
+    original = fake.discover
+    monkeypatch.setattr(fake, "discover",
+                        lambda self, s, kind, scope: seen.append(kind) or original(self, s, kind, scope))
+    path = cfg(*[doc("FakeItem", f"i{n}", targetRef="t1") for n in range(5)], CRED,
+               *[user(f"u{n}", cred="pw") for n in range(3)])
+    rep = run(path, "apply")
+    assert report.exit_code(rep) == 0 and all(o["status"] == "succeeded" for o in rep["operations"])
+    assert seen == ["FakeItem", "FakeUser"] * 2  # Discovery + eine Verifikation je Kind, nicht je Op
+
+
+def test_lock_held_skips_all_targets(cfg, fake, monkeypatch):
+    from contextlib import contextmanager
+
+    from ordivus import adapters
+    from ordivus.adapters.base import Adapter, TransientError
+
+    class Lockless(fake):
+        id = "fake-nolock"
+        lock = Adapter.lock
+
+    released = []
+
+    @contextmanager
+    def lock(self, session):
+        if session.instance == "i2":
+            raise TransientError("another apply holds the lock")
+        try:
+            yield
+        finally:
+            released.append(session.instance)
+
+    adapters.register(Lockless)
+    monkeypatch.setattr(fake, "lock", lock)
+    path = cfg(doc("Target", "t0", adapter="fake-nolock", instance="i0"),  # ohne Lock, läuft vor t2
+               doc("Target", "t2", adapter="fake", instance="i2"),
+               *[doc("FakeItem", n, targetRef=t) for n, t in (("a", "t0"), ("b", "t1"), ("c", "t2"))])
+    rep = run(path, "apply")
+    assert fake.calls == [] and report.exit_code(rep) == ExitCode.TARGET
+    status = {t["targetId"]: t for t in rep["targets"]}
+    assert status["t2"]["status"] == "error" and "holds the lock" in status["t2"]["reason"]
+    for name in ("t0", "t1"):
+        assert status[name]["status"] == "skipped" and "lock on target(s) 't2'" in status[name]["reason"]
+    assert released == ["i1"]  # vorab genommene Sperre wird freigegeben
+    assert [t["status"] for t in run(path, "plan")["targets"]] == ["drift_detected"] * 3  # plan sperrt nicht
+    monkeypatch.setattr(fake, "lock", Adapter.lock)
+    assert report.exit_code(run(path, "apply")) == 0 and len(fake.calls) == 3
+
+
+def test_changed_before_delete_or_password_reset_is_conflict(cfg, fake, monkeypatch):
+    fake.put("i1", "FakeItem", "x", {"size": 1})
+    fake.put("i1", "FakeItem", "y", {"size": 1})
+    fake.put("i1", "FakeUser", "u1", password="old")
+    original = engine.reconcile
+
+    def racing(*args, **kwargs):  # ein anderer Writer ändert zwischen Plan und Ausführung
+        ops = original(*args, **kwargs)
+        fake.put("i1", "FakeItem", "x", {"size": 2})
+        del fake.store["i1"]["FakeUser"]["u1"]
+        return ops
+
+    monkeypatch.setattr(engine, "reconcile", racing)
+    rep = run(cfg(AUTHORITATIVE, CRED, user()), "apply", allowAuthoritative=True, allowDelete=True)
+    status = {(o["id"], o["action"]): o["status"] for o in rep["operations"]}
+    assert status[("x", "DELETE")] == status[("u1", "SET_PASSWORD")] == "conflict"
+    assert status[("y", "DELETE")] == "succeeded"
+    assert fake.calls == [("i1", "DELETE", "FakeItem", "y")]
+    assert rep["targets"][0]["status"] == "partial" and report.exit_code(rep) == ExitCode.PARTIAL
+
+
+def test_blocked_status_same_in_plan_and_apply(cfg, fake):
+    fake.put("i1", "FakeItem", "sys", {"size": 1}, system=True)
+    path = cfg(doc("FakeItem", "sys", targetRef="t1", attrs={"size": 1}))
+    assert run(path, "plan")["targets"][0]["status"] == run(path, "apply")["targets"][0]["status"] == "drift_detected"
+
+
+def test_pre_write_reread_once_per_kind(cfg, fake, monkeypatch):
+    seen = []
+    original = fake.discover
+    monkeypatch.setattr(fake, "discover",
+                        lambda self, s, kind, scope: seen.append(kind) or original(self, s, kind, scope))
+    for n in range(3):
+        fake.put("i1", "FakeUser", f"u{n}", password="old")
+    path = cfg(CRED, *[user(f"u{n}", policy="enforce") for n in range(3)])
+    (cfg.secrets / "u1").write_text("new")
+    rep = run(path, "apply")
+    assert [o["status"] for o in rep["operations"] if o["action"] == "SET_PASSWORD"] == ["succeeded"] * 3
+    assert seen == ["FakeItem", "FakeUser", "FakeUser", "FakeUser"]  # Plan, ein Re-Read, eine Verifikation

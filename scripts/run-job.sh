@@ -75,6 +75,19 @@ interrupted() {
 trap 'interrupted 130' INT
 trap 'interrupted 143' TERM
 
+# concurrencyPolicy: Forbid greift nicht für manuell erzeugte Jobs: kein zweites apply aus derselben Vorlage.
+# shortcut: Prüfen und Anlegen sind nicht atomar; echte Serialisierung gehört in die CI (resource_group/lock).
+if [ "$mode" = apply ] && [ "${ORDIVUS_ALLOW_CONCURRENT:-}" != 1 ]; then
+  running=$(k get jobs -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=apply" \
+    -o 'jsonpath={range .items[*]}{.metadata.name} {.status.conditions[?(@.status=="True")].type}{"\n"}{end}') ||
+    { echo "cannot list apply jobs; refusing to start (override: ORDIVUS_ALLOW_CONCURRENT=1)" >&2; exit 1; }
+  running=$(printf '%s\n' "$running" | grep -Ev ' .*(Complete|Failed)' | cut -d' ' -f1 | grep . | tr '\n' ' ') || true
+  if [ -n "$running" ]; then
+    echo "apply job still active: $running; refusing to start (override: ORDIVUS_ALLOW_CONCURRENT=1)" >&2
+    exit 1
+  fi
+fi
+
 k create job "$job" --from="cronjob/$release-$mode" >&2
 echo "waiting for job/$job (timeout ${timeout}s)" >&2
 
@@ -92,7 +105,11 @@ done
 
 collect
 code=""
-[ -z "$pod" ] || code=$(k get pod "$pod" -o 'jsonpath={.status.containerStatuses[0].state.terminated.exitCode}')
+# API-Aussetzer nicht als Fehlschlag werten: bis zu dreimal lesen.
+[ -z "$pod" ] || for _ in 1 2 3; do
+  code=$(k get pod "$pod" -o 'jsonpath={.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null) && [ -n "$code" ] && break
+  code="" && sleep 2
+done
 if [ -z "$code" ]; then
   echo "job/$job finished without container exit code (state $state), e.g. deadline exceeded" >&2
   exit 1

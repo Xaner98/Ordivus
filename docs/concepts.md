@@ -17,7 +17,7 @@ That is why Ordivus also sees objects someone created by hand or with another to
 |---|---|---|
 | `ordivus plan` | What would `apply` do right now? | no |
 | `ordivus drift` | Does the actual state deviate from the desired state? Are there foreign objects? | no |
-| `ordivus apply` | Execute permitted changes and verify them afterwards | yes |
+| `ordivus apply` | Execute permitted changes and verify them afterwards (one re-read per resource kind after all operations) | yes |
 
 `plan` and `drift` change neither target systems nor secret stores – not even a password generated "just briefly". For real safety, also run these commands with an identity that has read-only access to the target system.
 
@@ -65,3 +65,7 @@ Ordivus is not a permanently running service. Your pipeline, your GitOps tool or
 ## Concurrent runs
 
 Adapters whose target system offers its own lock (e.g. PostgreSQL advisory locks, MySQL `GET_LOCK`) lock during `apply`. For systems without a locking mechanism, avoid parallel `apply` runs against the same target by organizational means.
+
+Before writing anything, `apply` connects to every target whose adapter supports locking and acquires all locks; each lock is released when its target is done. If any lock is held by another `apply`, no target is written: that target fails with exit code 13, all other targets are reported with target status `skipped` and the reason.
+
+Right before a `DELETE` or `SET_PASSWORD`, `apply` reads the object again. If it no longer matches what the plan saw (gone, now protected, or for `DELETE` changed attributes or an incomplete inventory), the operation is not executed and reported with status `conflict`; the target becomes `partial` (exit code 14). Run `plan` again to see the new state.

@@ -196,8 +196,15 @@ spec:
                 {{- end }}
           volumes:
             - name: config
+              {{- if .t.extraConfigSources }}
+              projected:
+                sources:
+                  - configMap: {name: {{ include "ordivus.configMapName" .root | quote }}}
+                  {{- toYaml .t.extraConfigSources | nindent 18 }}
+              {{- else }}
               configMap:
                 name: {{ include "ordivus.configMapName" .root | quote }}
+              {{- end }}
             - name: tmp
               emptyDir: {sizeLimit: 64Mi}
             {{- if $v.policy.configMap }}

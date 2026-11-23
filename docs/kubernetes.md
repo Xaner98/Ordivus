@@ -25,7 +25,7 @@ The ConfigMap may also be created by the chart (`configuration.source: inline`, 
 
 The ConfigMap is mounted directly under `/config` (without `subPath`). The hidden directories Kubernetes uses to swap the files atomically (`..data`, `..<timestamp>`) are skipped by the config loader, like all paths with a leading dot.
 
-**Limit:** a ConfigMap holds at most **1 MiB**. Split larger configurations across multiple ConfigMaps (mount them via `jobs.templates.<mode>.extraVolumes`/`extraVolumeMounts` under `/config/<subdirectory>`, per mode) or provide them as a volume from another source.
+**Limit:** a ConfigMap holds at most **1 MiB**. Split larger configurations across multiple ConfigMaps (add them per mode via `jobs.templates.<mode>.extraConfigSources`, see [Per-mode configuration](#per-mode-configuration)) or provide them as a volume from another source.
 
 ## Values overview
 
@@ -42,6 +42,7 @@ The ConfigMap is mounted directly under `/config` (without `subPath`). The hidde
 | `jobs.templates.<mode>.automountServiceAccountToken` | `false` | Kubernetes token per mode |
 | `jobs.templates.<mode>.projectedToken` | off | Projected, audience-bound token (e.g. OpenBao Kubernetes auth), under `mountPath/token` |
 | `jobs.templates.<mode>.extraArgs` | `[]` | Additional CLI arguments, e.g. `["--fail-on", "actionable"]` |
+| `jobs.templates.<mode>.extraConfigSources` | `[]` | **Per mode**: additional [projected volume sources](https://kubernetes.io/docs/concepts/storage/projected-volumes/) (`configMap`, `secret`) merged into `/config`, see [Per-mode configuration](#per-mode-configuration); also on `jobs.scheduledDrift` |
 | `jobs.templates.<mode>.env` / `extraVolumes` / `extraVolumeMounts` | `[]` | **Per mode**; there are deliberately no global variants, so that apply secrets never end up in plan/drift |
 | `jobs.scheduledDrift` | off, `0 2 * * *` | Additional, **non**-suspended drift CronJob `<release>-drift-scheduled` (own `env`/`extraVolumes`/`extraVolumeMounts`) |
 | `security.profile` | `standard` | `development`, `standard` or `hardened` (checks see [Security](#security)) |
@@ -55,6 +56,22 @@ The ConfigMap is mounted directly under `/config` (without `subPath`). The hidde
 Every pod runs with `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, seccomp `RuntimeDefault`, `enableServiceLinks: false` and `restartPolicy: Never`; the CronJobs have `concurrencyPolicy: Forbid`. An `emptyDir` under `/tmp` is available for temporary files. The container is invoked with `<mode> -f /config --format json`: logs and report end up as JSON lines in the pod log; the report is the line with `"type":"report"`.
 
 The `file` provider cannot create new secrets in the read-only mounted credentials directory. If `apply` is supposed to generate passwords, use an OpenBao provider for the apply credential or explicitly mount a writable volume (e.g. `emptyDir` or PVC) via `jobs.templates.apply.extraVolumes`/`extraVolumeMounts` – an `emptyDir` loses new secrets together with the pod.
+
+### Per-mode configuration
+
+All modes mount the same configuration. Where a mode needs something different – typically the OpenBao role of a `CredentialProvider` (`ordivus-readonly` for plan/drift, `ordivus-apply` for apply) – keep that part out of the shared ConfigMap and add it per mode with `extraConfigSources`. `/config` then becomes a projected volume of the main ConfigMap plus these sources:
+
+```yaml
+jobs:
+  templates:
+    plan: &readonly
+      extraConfigSources: [{configMap: {name: ordivus-auth-readonly}}]   # provider.yaml with role ordivus-readonly
+    drift: *readonly
+    apply:
+      extraConfigSources: [{configMap: {name: ordivus-auth-apply}}]      # provider.yaml with role ordivus-apply
+```
+
+File names must not collide with those of the main configuration (the API server rejects duplicate paths). The sources must exist in the namespace of the respective CronJob (for apply possibly `jobs.templates.apply.namespace`). With an empty list (default), `/config` is the plain ConfigMap as before.
 
 ## Starting runs
 
@@ -77,13 +94,16 @@ ORDIVUS_KUBE_CONTEXT=prod scripts/run-job.sh apply platform-config-apply my-rele
 | `ORDIVUS_RUN_ID` | `CI_JOB_ID`, else `BUILD_TAG`, else UTC timestamp | Part of the job name `<release>-<mode>-<id>`; made DNS-1123-compliant and truncated to 63 characters |
 | `ORDIVUS_TIMEOUT` | `2100` | Seconds the script waits; afterwards exit 1, the job keeps running until `activeDeadlineSeconds` |
 | `ORDIVUS_REPORT_DIR` | `reports` | Location for report and logs |
+| `ORDIVUS_ALLOW_CONCURRENT` | unset | `1` skips the check for an active apply job |
 | `KUBECTL` | `kubectl` | Path to kubectl |
 
 Before starting, the script deletes `<mode>.json` and `<mode>.log` from a previous run. The report is stored only if the log contains **exactly one** report line: with `jq`, a line that is valid JSON with `"type":"report"` and `schemaVersion`; without `jq`, a line that starts exactly with `{"type":"report","schemaVersion":"…",` and ends with `}` (engine logs never have this form; an application log line of exactly this form would be counted); otherwise the script reports this and exits with 1, unless the container has already exited with an error exit code anyway (which is preserved). Logs, report and exit code come from the job's most recent pod; if Kubernetes reports the job as `Failed` but the container exited with 0, the script exits with 1.
 
 If the job ends without a container exit code (e.g. `activeDeadlineSeconds` exceeded, image not pullable), the script exits with 1. On abort (SIGINT/SIGTERM), it collects the logs so far and deletes the job; Ordivus then receives SIGTERM.
 
-The CI identity needs in the respective namespace: `create` on `jobs`, `get` on `cronjobs` and `jobs`, `list` on `pods`, `get` on `pods/log`, `delete` on `jobs`. With a separate apply namespace (`jobs.templates.apply.namespace`), create **two** identities for this, each with one RoleBinding: the plan/drift identity (e.g. for merge request pipelines) only in the release namespace, the apply identity (protected branches/manual approval only) only in the apply namespace. A role with these permissions in the apply namespace is equivalent to apply permissions on all target systems.
+For `apply`, the script refuses to start (exit 1) while another job from the same apply template (labels `app.kubernetes.io/instance=<release>`, `app.kubernetes.io/component=apply`) has neither completed nor failed, or if it cannot list the jobs. `ORDIVUS_ALLOW_CONCURRENT=1` skips this check. Check and creation are not atomic; see [Preventing parallel applies](#preventing-parallel-applies).
+
+The CI identity needs in the respective namespace: `create` on `jobs`, `get`/`list` on `jobs` and `get` on `cronjobs`, `list` on `pods`, `get` on `pods/log`, `delete` on `jobs`. With a separate apply namespace (`jobs.templates.apply.namespace`), create **two** identities for this, each with one RoleBinding: the plan/drift identity (e.g. for merge request pipelines) only in the release namespace, the apply identity (protected branches/manual approval only) only in the apply namespace. A role with these permissions in the apply namespace is equivalent to apply permissions on all target systems.
 
 ### GitLab CI
 
@@ -127,6 +147,33 @@ stage('Ordivus drift') {
 
 Exit code 10 (drift above the threshold from `--fail-on`) fails the stage. If you want it only as a warning: evaluate `sh(script: '...', returnStatus: true)`.
 
+### Preventing parallel applies
+
+Two `apply` runs against the same targets at the same time compete for the same objects. Serialize them on the caller side; `concurrencyPolicy: Forbid` on the CronJob covers only jobs the CronJob controller starts itself, **not** jobs created with `kubectl create job --from=…` (`scripts/run-job.sh` does that).
+
+- **GitLab CI:** put all apply jobs of one environment into a `resource_group`; GitLab runs at most one job per group at a time, across pipelines:
+
+  ```yaml
+  ordivus-apply:
+    resource_group: ordivus-apply-prod
+  ```
+
+- **Jenkins:** `options { disableConcurrentBuilds() }` serializes builds of one job; across jobs, use the `lock` step of the Lockable Resources plugin:
+
+  ```groovy
+  stage('Ordivus apply') {
+    steps {
+      lock(resource: 'ordivus-apply-prod') {
+        sh 'scripts/run-job.sh apply platform-config-apply'
+      }
+    }
+  }
+  ```
+
+- **Kubernetes:** `scripts/run-job.sh apply` refuses to start while another apply job from the same template is active (see [Starting runs](#starting-runs)). This is a best-effort check, not a lock: two callers starting within the same moment can both pass it.
+
+As a last line of defense, PostgreSQL, MySQL and MariaDB targets also take a native advisory lock for the duration of an apply. If the lock is already held by another run, the engine does not change that target and aborts the remaining targets.
+
 ## Configuration versions
 
 The templates mount the ConfigMap that exists when the job starts. The pipeline must therefore first update the ConfigMap (or let GitOps sync it) and only then start the run. Which configuration a run used is recorded as `configDigest` in the report.
@@ -150,7 +197,7 @@ The templates mount the ConfigMap that exists when the job starts. The pipeline 
   - **Limits of the admission policy:** CEL cannot look up whether the owning job really comes from the CronJob; a copy of the template with a forged `ownerReference` is admitted. It starts a real `apply` run with apply credentials – at any time, also in parallel with other runs and without a pipeline. Not checked are `resources` (requests/limits), annotations and additional labels, as well as the allowed subkeys above; Pod Security Admission `restricted` on the apply namespace remains recommended as a second line of defense. Mutating webhooks or plugins that set further pod fields (e.g. sidecar injection) lead to rejection of legitimate apply pods as well. `pods/exec` and `pods/attach` are not pod changes and remain a matter for RBAC. Whoever may change the CronJob, ConfigMap or policy in the apply namespace changes what apply does. The policy reflects the state of the last Helm installation; after changes to the template outside of Helm, it rejects apply pods.
 - Checks at render time in **every** profile: the read-only and apply ServiceAccounts must have different names; `jobs.templates.apply.suspended: false` only with `allowSchedule: true`.
 - Additionally in the **`hardened`** profile: `image.digest` in the format `sha256:<64 hex>`, a policy, `networkPolicy.enabled`, no `automountServiceAccountToken: true` in any mode, every egress rule with `ports` and without `0.0.0.0/0`/`::/0`, apply template suspended, separate apply namespace or `admission.enabled`.
-- `concurrencyPolicy: Forbid` applies only to jobs the CronJob controller starts itself, not to manually created ones. The chart does not prevent two concurrent `apply` runs.
+- `concurrencyPolicy: Forbid` applies only to jobs the CronJob controller starts itself, not to manually created ones. The chart does not prevent two concurrent `apply` runs; see [Preventing parallel applies](#preventing-parallel-applies).
 - plan/drift run with `ordivus-readonly` and see only `credentials.readOnly`; the target system permissions of these credentials should also be read-only.
 - Kubernetes tokens are not mounted by default. For OpenBao Kubernetes auth, enable `projectedToken` in the affected mode instead of `automountServiceAccountToken: true`.
 - `ttlSecondsAfterFinished` deletes jobs including their logs. Reports that serve as audit evidence are archived by the pipeline (`reports/`).

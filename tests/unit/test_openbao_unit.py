@@ -144,3 +144,16 @@ def test_policy_path_may_match_guarded_prefixes():
     for text in ('path "a" { capabilities = ["read"] } junk', 'path "a" { capabilities = [read] }',
                  'path "a" { capabilities = ["read"]\n policy = "write" }', 'path "a\\q" { capabilities = ["read"] }'):
         assert parse(text) is None, text
+
+
+def test_transport_error_names_the_reason_without_token(monkeypatch):
+    import ssl
+    import urllib.error
+
+    def fail(req, timeout, ctx):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed"))
+
+    monkeypatch.setattr(openbao_http.net, "urlopen", fail)
+    with pytest.raises(TransientError, match="URLError: .*certificate verify failed: self-signed") as e:
+        openbao_http.request("https://bao.example", "GET", "sys/health", token="s.SECRET-TOKEN")
+    assert "SECRET" not in str(e.value)

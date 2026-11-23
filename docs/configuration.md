@@ -157,12 +157,12 @@ Without `--policy`, exactly these values apply. A policy file that is specified 
 | 11 | Policy violation or disallowed operation; for `apply` also any `BLOCKED` operation (the others still run) |
 | 12 | Configuration error |
 | 13 | Target system, credential or network unavailable; for `apply` also when a declared resource could not be verified (target status `incomplete`) |
-| 14 | Partially executed or not confirmed after `apply` – please check (also: target aborted after first changes, status `partial`) |
+| 14 | Partially executed or not confirmed after `apply` – please check (also: target aborted after first changes, or an operation skipped with status `conflict`; target status `partial`) |
 | 130 / 143 | Aborted (SIGINT / SIGTERM) |
 
 Thresholds: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable|unmanaged|unknown|any`. `unknown` triggers as soon as something could not be determined (`UNKNOWN` operations or target status `incomplete`); `any` includes it. Without `--fail-on`, `plan` and `drift` exit with 0 even if differences were found.
 
-Target status in the report: `in_sync`, `drift_detected`, `incomplete` (inventory incomplete, or a declared resource or its password not verifiable), and for `apply` also `applied`, `partial` and `error`. An `apply` never reports `in_sync` as long as a declared resource is `UNKNOWN`, and in authoritative mode also not as long as the inventory is incomplete (then `incomplete`, exit 13). An unexpected error (e.g. an adapter bug) only marks that target as failed; the remaining targets continue. stderr then shows only the error type; a traceback is shown only with `ORDIVUS_DEBUG=1` (may contain secrets, for debugging only).
+Target status in the report: `in_sync`, `drift_detected`, `incomplete` (inventory incomplete, or a declared resource or its password not verifiable), and for `apply` also `applied`, `partial`, `error` and `skipped` (not run because a target's lock was held by a concurrent `apply`). An `apply` never reports `in_sync` as long as a declared resource is `UNKNOWN`, and in authoritative mode also not as long as the inventory is incomplete (then `incomplete`, exit 13). A remaining `BLOCKED` operation gives `drift_detected` in `apply` just as in `plan`. An unexpected error (e.g. an adapter bug) only marks that target as failed; the remaining targets continue. stderr then shows only the error type; a traceback is shown only with `ORDIVUS_DEBUG=1` (may contain secrets, for debugging only).
 
 ## Proxy
 

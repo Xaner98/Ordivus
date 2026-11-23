@@ -8,7 +8,7 @@ import fnmatch
 import heapq
 import logging
 from collections import Counter, defaultdict
-from contextlib import nullcontext
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -464,22 +464,33 @@ def _dependency_order(adapter: Adapter, ops: list[Op]) -> list[Op]:
 
 # --- Ausführung ---------------------------------------------------------------------------------
 
-def _verify(target: Target, session, op: Op) -> bool:
-    """Liest die Ressource nach der Operation erneut; False = Ergebnis weicht ab."""
-    # shortcut: re-discovers the whole kind per op, upgrade to a per-resource read when inventories get large.
-    found = _discover(target, session, op.kind)
+def _verify(target: Target, session, op: Op, found: Discovery, password: Secret | None) -> bool:
+    """Prüft eine ausgeführte Op gegen die erneute Discovery ihres Kinds; False = Ergebnis weicht ab."""
     have = next((r for r in found.resources if r.id == op.id), None)
     if op.action == DELETE:
         return found.status == COMPLETE and have is None
     if have is None:
         return False
-    if op.password is not None:
+    if password is not None:
         try:
-            if target.adapter.verify_password(session, target.spec, have, op.password) is False:
+            if target.adapter.verify_password(session, target.spec, have, password) is False:
                 return False
         except AdapterError:
             pass  # nicht prüfbar ist kein Gegenbeweis
     return op.action == SET_PASSWORD or all(have.attrs.get(f) == v for f, v in op.desired.attrs.items())
+
+
+def _conflict(found: Discovery, op: Op) -> str | None:
+    """Prüft DELETE/SET_PASSWORD gegen eine frische Discovery (TOCTOU); Grund, falls der Plan nicht mehr passt."""
+    have = next((r for r in found.resources if r.id == op.id), None)
+    if have is None or (op.action == DELETE and found.status != COMPLETE):
+        return f"changed since plan: re-read found {'nothing' if have is None else 'object'} " \
+               f"(discovery {found.status})"
+    if have.system or not have.manageable:
+        return "changed since plan: object is now protected or not manageable"
+    if op.action == DELETE and have.attrs != op.observed.attrs:
+        return "changed since plan: attributes differ"
+    return None
 
 
 def _scrub(text: str, secrets: list[Secret]) -> str:
@@ -510,8 +521,13 @@ class _ScrubFilter(logging.Filter):
 
 
 def _execute(target: Target, session, ops: list[Op], model: Model) -> None:
-    """Führt mutierende Ops der Reihe nach aus; nach einem Fehler werden die übrigen übersprungen."""
+    """Führt mutierende Ops der Reihe nach aus; nach einem Fehler werden die übrigen übersprungen.
+
+    Verifiziert wird danach gebündelt: eine Discovery je betroffenem Kind statt je Op.
+    """
     created: dict[str, Secret] = {}
+    fresh: dict[str, Discovery] = {}  # Re-Read je Kind vor DELETE/SET_PASSWORD
+    applied: list[tuple[Op, Secret | None]] = []
     failed = False
     for op in ops:
         if op.action not in MUTATING:
@@ -527,29 +543,63 @@ def _execute(target: Target, session, ops: list[Op], model: Model) -> None:
                     cred.spec, generate(gen.get("length", 32), gen.get("alphabet", "alphanumeric"))), model.known)
                 op.status = "succeeded" if _state(cred) == PRESENT else "unverified"
                 continue
+            if op.action in (DELETE, SET_PASSWORD) and op.kind not in fresh:
+                fresh[op.kind] = _discover(target, session, op.kind)
+            if op.action in (DELETE, SET_PASSWORD) and (reason := _conflict(fresh[op.kind], op)):
+                op.status, op.reason = "conflict", reason
+                log.warning("target %s: %s %s/%s not executed: %s", target.name, op.action, op.kind, op.id, reason)
+                continue
             ref = op.desired.password_ref if op.desired else None
             if ref and op.action in (CREATE, SET_PASSWORD):
                 cred = model.credentials[ref]
                 op.password = created.get(ref) or _read(cred, model.known)
             target.adapter.apply(session, op)
-            op.status = "succeeded" if _verify(target, session, op) else "unverified"
+            if op.action in (CREATE, UPDATE):  # DELETE/SET_PASSWORD ändern nur ihr eigenes, schon geprüftes Objekt
+                fresh.pop(op.kind, None)
+            op.status = "unverified"  # bis die Verifikation unten das Ergebnis beobachtet
+            applied.append((op, op.password))
         except Exception as e:  # jeder Fehler (auch Adapter-Bugs) stoppt dieses Target, nicht den Lauf
             failed, op.status = True, "failed"
             op.reason = f"{type(e).__name__}: {e}"  # Scrubbing zentral in run()
         finally:
             op.password = None
+    found = {kind: _discover(target, session, kind) for kind in dict.fromkeys(op.kind for op, _ in applied)}
+    for op, password in applied:
+        try:
+            if _verify(target, session, op, found[op.kind], password):
+                op.status = "succeeded"
+        except Exception as e:  # Adapter-Bug in der Prüfung: bleibt "unverified"
+            log.error("target %s: verifying %s/%s failed: %s", target.name, op.kind, op.id, type(e).__name__)
 
 
-def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy) -> tuple[dict, list[Op]]:
+def _open(target: Target, model: Model, write: bool) -> tuple[ExitStack, object, Exception | None, bool]:
+    """Verbindet (und sperrt in apply); liefert (Stack, Session, Fehler, Lock nicht erhalten)."""
+    stack, stage = ExitStack(), "connect"
+    try:
+        secret = _read(model.credentials[target.auth], model.known) if target.auth else None
+        session = stack.enter_context(target.adapter.connect(target.spec, secret, write))
+        stage = "lock"
+        if write:
+            stack.enter_context(target.adapter.lock(session))
+        return stack, session, None, False
+    except Exception as e:
+        with suppress(Exception):  # der ursprüngliche Fehler zählt
+            stack.close()
+        return stack, None, e, stage == "lock"
+
+
+def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy, opened=None) -> tuple[dict, list[Op]]:
+    """``opened``: Ergebnis von ``_open`` aus der Lock-Vorphase, sonst wird hier verbunden."""
     info = {"targetId": target.name, "adapter": target.adapter.id, "inventory": {}, "status": "error"}
     if target.adapter.insecure_transport(target.spec):
         info["insecureTransport"] = True
     ops: list[Op] = []
     write = mode == "apply"
     try:
-        secret = _read(model.credentials[target.auth], model.known) if target.auth else None
-        with target.adapter.connect(target.spec, secret, write) as session, \
-                (target.adapter.lock(session) if write else nullcontext()):
+        stack, session, error, _ = opened or _open(target, model, write)
+        if error:
+            raise error
+        with stack:
             if (server := target.adapter.server_version(session)) is not None:
                 info["serverVersion"] = server
             found = {kind: _discover(target, session, kind) for kind in target.adapter.kinds}
@@ -609,11 +659,24 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
             log.warning("target %s: insecure transport (no TLS or no certificate verification)", name)
     targets, ops, scrub = [], [], _ScrubFilter(model.known)
     log.addFilter(scrub)
+    opened = {}  # apply: alle sperrbaren Targets vorab verbinden und sperren, bevor irgendwo geschrieben wird
     try:
+        if mode == "apply":
+            opened = {n: _open(model.targets[n], model, True) for n in names
+                      if type(model.targets[n].adapter).lock is not Adapter.lock}
+        held = [n for n, o in opened.items() if o[3]]  # Lock hält ein anderer apply
         for name in names:
-            info, target_ops = _run_target(mode, model.targets[name], model, policy)
+            if held and name not in held:
+                targets.append({"targetId": name, "adapter": model.targets[name].adapter.id, "inventory": {},
+                                "status": "skipped", "reason": "not run: lock on target(s) "
+                                f"{', '.join(map(repr, held))} is held by another apply"})
+                continue
+            info, target_ops = _run_target(mode, model.targets[name], model, policy, opened.pop(name, None))
             targets.append(info)
             ops += target_ops
     finally:
+        for stack, *_ in opened.values():  # übersprungene Targets: Sperre und Verbindung sofort freigeben
+            with suppress(Exception):
+                stack.close()
         log.removeFilter(scrub)
     return _scrub_all(report.build(mode, started, datetime.now(UTC), digest, targets, ops), model.known)

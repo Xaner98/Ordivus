@@ -152,8 +152,8 @@ spec:
 | `owner` | Owner role; changes are applied via `ALTER DATABASE … OWNER TO` |
 | `encoding` | Only on `CREATE`. Use the name PostgreSQL reports (e.g. `UTF8`, `LATIN1`); a mismatch on an existing database is an error, not a re-creation |
 
-`DELETE` of a database is a plain `DROP DATABASE` without `FORCE`: existing connections
-make the operation fail.
+`DELETE` of a database is a plain `DROP DATABASE` without `FORCE`: Ordivus first closes its own
+connections to that database; any other existing connections make the operation fail.
 
 ## Kind `Grant`
 
@@ -200,10 +200,12 @@ Semantics:
 ## Discovery and scope
 
 - Roles and databases come from `pg_roles` and `pg_database` (readable by any login role).
-- Grants live per database. Ordivus opens a separate read-only connection for **every** database in scope
-  (`datallowconn`, no templates). If one of them fails (e.g. missing `CONNECT`), the
-  inventory for `Grant` is `partial` with a reason; declared grants then become `UNKNOWN`, never
-  `CREATE`, and nothing is deleted.
+- Grants live per database. Ordivus opens a separate connection for **every** database in scope
+  (`datallowconn`, no templates): read-only in `plan`/`drift`; in `apply` the same connection serves
+  discovery and writes. At most 8 stay open per run (the least recently used one is closed). If one of
+  them fails (e.g. missing `CONNECT`), the inventory for `Grant` is `partial` with a reason and a
+  warning naming the database is logged; declared grants then become `UNKNOWN`, never `CREATE`, and
+  nothing is deleted.
 - The target's `spec.scope` limits what Ordivus sees at all. Objects outside it do not appear
   in the report and cannot be deleted. A declared grant on a database outside the
   scope fails in `apply`. What may be deleted in authoritative mode is additionally governed by
@@ -221,7 +223,9 @@ Never deleted or changed; undeclared ones are counted as `IGNORE`:
 - roles with prefix `pg_` and the bootstrap superuser (OID 10, usually `postgres`),
 - the databases `postgres`, `template0`, `template1`,
 - roles the Ordivus login is a member of (transitively), including the grants to them and to the
-  login itself: revoking or deleting them would lock Ordivus out,
+  login itself: revoking or deleting them would lock Ordivus out. On PostgreSQL 16+ only memberships
+  with `INHERIT` or `SET` count; the `ADMIN`-only membership PostgreSQL gives a `CREATEROLE` login
+  in every role it creates does not protect that role,
 - grants to these roles and the implicit permissions of the object owner.
 
 Not manageable (`manageable: false`, never deleted, changes `BLOCKED`): superuser roles and the
@@ -238,7 +242,9 @@ Ordivus must additionally be allowed to log in to `endpoint.database` as each ma
 are granted, or the role created them itself), `CREATEDB`, membership in the
 owner roles for `CREATE DATABASE … OWNER`/`ALTER … OWNER TO`, and for grants the right to pass on the
 privileges (owner of the objects or `WITH GRANT OPTION`). A superuser can do everything
-but is not required; on managed services (RDS, Cloud SQL) use the admin role provided there.
+but is not required; on managed services (RDS, Cloud SQL) use the admin role provided there. A
+non-superuser `CREATEROLE` login is supported, including on PostgreSQL 16+ where it becomes an
+`ADMIN`-only member of the roles it creates.
 
 ## Limitations
 

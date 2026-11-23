@@ -21,7 +21,8 @@ Lifecycle per run and target:
 5. Planning: ``check(session, resource, allow_privileged)`` per desired resource,
    ``dependencies(resource)`` for ordering, ``verify_password`` where a resource carries
    ``spec.credentials`` with policy ``verify``.
-6. apply only: ``apply(session, op)`` per operation, followed by ``discover`` again to verify.
+6. apply only: ``apply(session, op)`` per operation (``DELETE``/``SET_PASSWORD`` are preceded by a
+   fresh ``discover`` of their kind), then ``discover`` once per affected kind to verify.
 
 Rules every adapter must keep:
 

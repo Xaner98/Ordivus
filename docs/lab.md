@@ -83,16 +83,13 @@ instead, plus a role `lab_dbNNN_audit`.
 
 plan/drift run as `ordivus-readonly`, apply as `ordivus-apply`, each with its own projected token, OpenBao
 role and policy token. The KV provider needs the OpenBao role in the configuration (`auth.role`), so the
-configuration differs per mode. The chart mounts one configuration for all modes; the lab therefore mounts a
-projected volume per mode (`ordivus-lab-config` plus `ordivus-lab-auth-readonly` or `-apply`) at
-`/lab-config` and passes `-f /lab-config`.
+configuration differs per mode. `lab/values.yaml` therefore adds `ordivus-lab-auth-readonly` or
+`ordivus-lab-auth-apply` to `/config` per mode via `jobs.templates.<mode>.extraConfigSources`.
 
-## Known effect: `LAB_PG_ADMIN=createrole` on PostgreSQL 16+
+## Image
 
-PostgreSQL 16+ grants the creating role an implicit membership with `ADMIN OPTION` in every role created by
-a non-superuser `CREATEROLE` login. Ordivus treats roles its login is a member of as protected, so after the
-first `apply` every lab role, user and grant is reported as `BLOCKED` ("protected system object") and `apply`
-exits with 11. Use `LAB_PG_ADMIN=superuser scripts/lab.sh up` (after `reset`) to work around it.
+On Docker Desktop's kind-based Kubernetes the node has its own containerd image store; `up` loads the local
+`ordivus:dev` into it. After rebuilding the image, run `up` again, otherwise the jobs keep the old image.
 
 ## Troubleshooting
 

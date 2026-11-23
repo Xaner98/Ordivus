@@ -5,36 +5,17 @@ policy: {configMap: ordivus-lab-policy}
 credentials:
   readOnly: {secret: {secretName: lab-openbao-token-readonly}}
   apply: {secret: {secretName: lab-openbao-token-apply}}
-# Die Config ist bis auf die OpenBao-Rolle für alle Modi gleich. Der Chart kennt nur eine Config pro Release,
-# daher pro Modus ein projiziertes Volume (gemeinsame Config + auth-<modus>.yaml) und -f auf dieses Verzeichnis.
+# Die Config ist bis auf die OpenBao-Rolle für alle Modi gleich: auth.yaml pro Modus über extraConfigSources.
 jobs:
   templates:
     plan: &readonly
       projectedToken: {enabled: true, audience: openbao}
-      extraArgs: [-f, /lab-config]
-      extraVolumes:
-        - name: lab-config
-          projected:
-            sources:
-              - configMap: {name: ordivus-lab-config}
-              - configMap: {name: ordivus-lab-auth-readonly}
-        - name: openbao-ca
-          configMap: {name: openbao-ca}
-      extraVolumeMounts:
-        - {name: lab-config, mountPath: /lab-config, readOnly: true}
-        - {name: openbao-ca, mountPath: /etc/ordivus-lab, readOnly: true}
+      extraConfigSources: [{configMap: {name: ordivus-lab-auth-readonly}}]
+      extraVolumes: [{name: openbao-ca, configMap: {name: openbao-ca}}]
+      extraVolumeMounts: [{name: openbao-ca, mountPath: /etc/ordivus-lab, readOnly: true}]
     drift: *readonly
     apply:
       projectedToken: {enabled: true, audience: openbao}
-      extraArgs: [-f, /lab-config]
-      extraVolumes:
-        - name: lab-config
-          projected:
-            sources:
-              - configMap: {name: ordivus-lab-config}
-              - configMap: {name: ordivus-lab-auth-apply}
-        - name: openbao-ca
-          configMap: {name: openbao-ca}
-      extraVolumeMounts:
-        - {name: lab-config, mountPath: /lab-config, readOnly: true}
-        - {name: openbao-ca, mountPath: /etc/ordivus-lab, readOnly: true}
+      extraConfigSources: [{configMap: {name: ordivus-lab-auth-apply}}]
+      extraVolumes: [{name: openbao-ca, configMap: {name: openbao-ca}}]
+      extraVolumeMounts: [{name: openbao-ca, mountPath: /etc/ordivus-lab, readOnly: true}]

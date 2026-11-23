@@ -75,7 +75,8 @@ class Env:
             if name.startswith(self.p):
                 self.admin.execute(psycopg.sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
                     psycopg.sql.Identifier(name)))
-        for (name,) in self.admin.execute("SELECT rolname FROM pg_roles").fetchall():
+        # absteigend: PG 16+ hält Mitgliedschaften als Grantor-Abhängigkeit des Erstellers (…_adm vor …_app)
+        for (name,) in self.admin.execute("SELECT rolname FROM pg_roles ORDER BY 1 DESC").fetchall():
             if name.startswith(self.p):
                 self.admin.execute(psycopg.sql.SQL("DROP ROLE {}").format(psycopg.sql.Identifier(name)))
 
@@ -218,12 +219,34 @@ def test_read_only_session_cannot_mutate(pg):
     with adapter.connect(pg.target(), Secret(ADMIN_PW), write=False) as session:
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             session.conn.execute(psycopg.sql.SQL("CREATE ROLE {}").format(psycopg.sql.Identifier(pg.p + "x")))
-        with adapter._database(session, "postgres") as conn, pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        conn = adapter._database(session, "postgres")
+        assert adapter._database(session, "postgres") is conn  # je Session wiederverwendet
+        with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             conn.execute("CREATE TABLE ordivus_should_not_exist (i int)")
         op = Op("pg", "DatabaseRole", pg.p + "x", CREATE, desired=Resource("DatabaseRole", pg.p + "x"))
         with pytest.raises(PermanentError):
             adapter.apply(session, op)
-    assert pg.objects() == []
+    assert pg.objects() == [] and conn.closed
+
+
+def test_grant_discovery_beyond_cache_size_keeps_connections_bounded(pg, monkeypatch):
+    from ordivus.adapters import postgresql
+
+    monkeypatch.setattr(postgresql, "MAX_DATABASE_CONNECTIONS", 2)
+    names = [pg.p + f"db{i}" for i in range(4)]
+    pg.sql("CREATE ROLE {} NOLOGIN", pg.p + "r")
+    for name in names:
+        pg.sql("CREATE DATABASE {}", name)
+        pg.sql("GRANT CONNECT ON DATABASE {} TO {}", name, pg.p + "r")
+    adapter = PostgreSQLAdapter()
+    with adapter.connect(pg.target(), Secret(ADMIN_PW), write=True) as session:
+        for _ in range(2):
+            found = adapter.discover(session, "Grant", pg.target()["scope"])
+            assert found.status == "complete" and {r.attrs["database"] for r in found.resources} == set(names)
+            assert list(session.databases) == names[-2:]
+        opened = pg.admin.execute("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'ordivus' "
+                                  "AND datname = ANY(%s)", (names,)).fetchone()[0]
+        assert opened == 2
 
 
 def test_tables_in_schema_grant(pg):
@@ -355,6 +378,31 @@ def test_roles_of_the_admin_login_are_system(pg):
     ops = {o["id"]: o["action"] for o in rep["operations"] if o["kind"] == "DatabaseRole"}
     assert ops == {p + "grp": "BLOCKED", p + "other": "DELETE"}  # outer: IGNORE (nicht im Report)
     assert report.exit_code(rep) == 0
+
+
+def test_createrole_login_reapply_is_noop(pg):
+    """PG 16+: der Ersteller wird ADMIN-Mitglied (ohne INHERIT/SET) jeder angelegten Rolle – das schützt sie nicht."""
+    p = pg.p
+    (pg.secrets / "adm").write_text("adm-secret-1234")
+    pg.sql("CREATE ROLE {} LOGIN CREATEROLE PASSWORD 'adm-secret-1234'", p + "adm")
+    path = pg.cfg(doc("Credential", "adm", providerRef="files", path="adm"),
+                  doc("DatabaseRole", "r", name=p + "readers"),
+                  doc("DatabaseUser", "u", name=p + "app", memberOf=[p + "readers"]), user=p + "adm", cred="adm")
+    first = run(path, "apply")
+    assert report.exit_code(first) == 0, first["operations"]
+    second = run(path, "apply")
+    assert [o for o in second["operations"] if o["action"] in MUTATING | {"BLOCKED"}] == []
+    assert report.exit_code(second) == 0
+
+
+def test_delete_database_with_cached_discovery_connection(pg):
+    pg.sql("CREATE DATABASE {}", pg.p + "gone")
+    policy = doc("ReconciliationPolicy", "gov", targetRef="pg", mode="authoritative",
+                 scope={"resourceKinds": ["Database"], "Database": {"glob": [pg.p + "gone"]}})
+    rep = run(pg.cfg(policy), "apply", allowAuthoritative=True, allowDelete=True)
+    assert ("Database", pg.p + "gone", "DELETE") in actions(rep)
+    assert report.exit_code(rep) == 0, rep["operations"]
+    assert pg.objects() == []
 
 
 def test_escalating_grants_need_policy(pg):

@@ -44,6 +44,11 @@ jobs:
         expirationSeconds: 600
         mountPath: /var/run/secrets/tokens
       extraArgs: []
+      # Additional projected volume sources merged into /config for this mode only, e.g. a ConfigMap with a
+      # CredentialProvider that uses a different OpenBao role per mode:
+      #   [{configMap: {name: ordivus-auth-readonly}}]
+      # File names must not collide with those of the main configuration. Empty: /config is the plain ConfigMap.
+      extraConfigSources: []
       # Separate per mode, so that apply secrets never end up in plan/drift.
       env: []
       extraVolumes: []
@@ -67,6 +72,7 @@ jobs:
       expirationSeconds: 600
       mountPath: /var/run/secrets/tokens
     extraArgs: []
+    extraConfigSources: []
     env: []
     extraVolumes: []
     extraVolumeMounts: []

@@ -24,12 +24,15 @@ psql_admin() { k exec -i deploy/postgres -- psql -q -U postgres -v ON_ERROR_STOP
 apply_cm() { name=$1; shift; k create configmap "$name" "$@" --dry-run=client -o yaml | k apply -f - >/dev/null; }
 
 up() {
-  # createrole: Least-Privilege-Login (Standard). superuser: Umgehung für PG 16+, wo jede von einem
-  # CREATEROLE-Login angelegte Rolle eine implizite ADMIN-Mitgliedschaft des Logins bekommt (docs/lab.md).
+  # createrole: Least-Privilege-Login (Standard). superuser: zum Vergleich.
   case ${LAB_PG_ADMIN:-createrole} in
     createrole) attr=NOSUPERUSER ;; superuser) attr=SUPERUSER ;;
     *) echo "LAB_PG_ADMIN must be createrole or superuser" >&2; exit 2 ;;
   esac
+  # Docker Desktop (kind-Modus) hat einen eigenen containerd-Store: lokales ordivus:dev hineinladen.
+  if docker inspect desktop-control-plane >/dev/null 2>&1; then
+    docker save ordivus:dev | docker exec -i desktop-control-plane ctr -n k8s.io images import - >/dev/null
+  fi
   kc get namespace "$ns" >/dev/null 2>&1 || kc create namespace "$ns" >/dev/null
   # Einmalige Geheimnisse und TLS: nur anlegen, wenn sie fehlen (sonst laufende Pods inkonsistent).
   k get secret openbao-root >/dev/null 2>&1 || rand | k create secret generic openbao-root --from-file=token=/dev/stdin >/dev/null
@@ -278,7 +281,7 @@ race() {
   for x in a b; do
     cm=ordivus-lab-config; [ "$x" = b ] && cm=$second
     k create job "ordivus-apply-race-$id-$x" --from=cronjob/ordivus-apply --dry-run=client -o json |
-      jq --arg cm "$cm" '(.spec.template.spec.volumes[] | select(.name == "lab-config") | .projected.sources[0].configMap.name) = $cm' \
+      jq --arg cm "$cm" '(.spec.template.spec.volumes[] | select(.name == "config") | .projected.sources[0].configMap.name) = $cm' \
       >"$out/race-$x.job.json"
   done
   s0=$(sessions) t0=$(now)

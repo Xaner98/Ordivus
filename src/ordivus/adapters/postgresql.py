@@ -2,14 +2,16 @@
 
 Kinds: ``DatabaseRole`` (Rolle ohne LOGIN), ``DatabaseUser`` (Rolle mit LOGIN), ``Database``, ``Grant``.
 Rollen sind instanzweit, Grants liegen je Datenbank: die Grant-Discovery öffnet eine Verbindung je
-Datenbank im Scope und meldet ``partial``, sobald eine davon nicht lesbar ist.
+Datenbank im Scope (einmal je Session, danach wiederverwendet) und meldet ``partial``, sobald eine davon nicht
+lesbar ist.
 """
 
 import hashlib
 import json
+import logging
 from collections import defaultdict
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ordivus.adapters import common
@@ -55,15 +57,19 @@ TABLES_QUERY = ("SELECT n.nspname, c.oid, c.relowner, a.grantee, a.privilege_typ
                 f"WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND {USER_SCHEMA}")
 
 
-def _chain(start: str) -> str:
+def _chain(start: str, where: str = "") -> str:
     """CTE ``up``: die Rolle ``start`` und alle Rollen, deren Mitglied sie (transitiv) ist; UNION bricht Zyklen."""
     return ("WITH RECURSIVE up(oid) AS (SELECT oid FROM pg_roles WHERE rolname = " + start +
-            " UNION SELECT m.roleid FROM pg_auth_members m JOIN up ON m.member = up.oid) ")
+            " UNION SELECT m.roleid FROM pg_auth_members m JOIN up ON m.member = up.oid" + where + ") ")
 
 
+# Nur Mitgliedschaften, die Rechte bringen (INHERIT oder SET): PG 16+ macht eine CREATEROLE-Anmeldung zum reinen
+# ADMIN-Mitglied jeder Rolle, die sie anlegt. Vor PG 16 fehlen die Spalten (NULL über to_jsonb) → jede zählt.
+HOLDS_PRIVILEGES = (" WHERE coalesce((to_jsonb(m) ->> 'inherit_option')::bool OR "
+                    "(to_jsonb(m) ->> 'set_option')::bool, true)")
 # Rollen, deren Mitglied die Ordivus-Anmeldung ist: Entzug/Löschen hieße Selbstaussperrung (nie pg_has_role:
 # für Superuser ist das für jede Rolle wahr)
-ADMIN_CHAIN = _chain("current_user") + "SELECT oid FROM up"
+ADMIN_CHAIN = _chain("current_user", HOLDS_PRIVILEGES) + "SELECT oid FROM up"
 ROLES_QUERY = ("SELECT r.oid, r.rolname, r.rolcanlogin, r.rolsuper, r.rolconnlimit, r.rolcreatedb, r.rolcreaterole, "
                "array(SELECT DISTINCT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid "
                f"WHERE m.member = r.oid ORDER BY 1), r.rolname = current_user, r.oid IN ({ADMIN_CHAIN}) "
@@ -78,6 +84,8 @@ PRIVILEGED_QUERY = _chain("%s") + ("SELECT r.oid, r.rolname, r.rolsuper, r.rolcr
 # CREATE auf Schema/Datenbank: Objekte im search_path fremder Rollen (bzw. ein Schema "$user") kapern deren Aufrufe.
 PRIVILEGED_GRANTS = {"database": {"CREATE"}, "schema": {"CREATE"}, "tables-in-schema": {"TRIGGER", "MAINTAIN"}}
 RESERVED_SCHEMAS = ("pg_catalog", "information_schema")
+MAX_DATABASE_CONNECTIONS = 8  # je Session offen gehaltene Datenbankverbindungen (LRU); max_connections ist knapp
+log = logging.getLogger("ordivus")
 MIN_VERSION = 130000  # server_version_num; ältere Versionen sind ungetestet und ohne Herstellersupport
 
 
@@ -88,6 +96,7 @@ class Session:
     secret: Secret | None
     write: bool
     version: int  # server_version_num, z. B. 170002
+    databases: dict = field(default_factory=dict)  # dbname -> offene Verbindung, älteste zuerst (LRU)
 
 
 # --- Validierung --------------------------------------------------------------------------------
@@ -234,12 +243,16 @@ def _mapped():
         raise _error(e) from None
 
 
-@contextmanager
-def _open(params: dict):
+def _connect(params: dict):
     import psycopg
 
     with _mapped():
-        conn = psycopg.connect(**params)
+        return psycopg.connect(**params)
+
+
+@contextmanager
+def _open(params: dict):
+    conn = _connect(params)
     try:
         yield conn
     finally:
@@ -328,14 +341,24 @@ class PostgreSQLAdapter(Adapter):
             session = Session(conn, target, secret, write, conn.info.server_version)
             if session.version < MIN_VERSION:
                 raise PermanentError(f"{self.server_version(session)} is not supported (minimum PostgreSQL 13)")
-            yield session
+            try:
+                yield session
+            finally:
+                _close_databases(session)
 
     def server_version(self, session):
         major, minor = divmod(session.version, 10000)  # ab PG 10: MMmmmm, davor MMmmpp (9.6.24 = 90624)
         return f"PostgreSQL {major}.{minor}" if major >= 10 else f"PostgreSQL {major}.{minor // 100}.{minor % 100}"
 
-    def _database(self, session: Session, dbname: str, write: bool = False):
-        return _open(_params(session.target, session.secret, dbname=dbname, read_only=not write))
+    def _database(self, session: Session, dbname: str):
+        # Schreibsession: eine Verbindung je Datenbank für Lesen und Schreiben; plan/drift bleiben read-only
+        conn = session.databases.pop(dbname, None)
+        if conn is None or conn.closed:
+            while len(session.databases) >= MAX_DATABASE_CONNECTIONS:
+                _close_databases(session, next(iter(session.databases)))
+            conn = _connect(_params(session.target, session.secret, dbname=dbname, read_only=not session.write))
+        session.databases[dbname] = conn
+        return conn
 
     def discover(self, session, kind, scope):
         with _mapped():
@@ -360,10 +383,11 @@ class PostgreSQLAdapter(Adapter):
         resources, failed = [], []
         for db in databases:
             try:
-                with self._database(session, db) as conn, _mapped():
-                    resources += _grants(conn, db, scope)
+                with _mapped():
+                    resources += _grants(self._database(session, db), db, scope)
             except AdapterError as e:
                 failed.append(f"database {db!r}: {type(e).__name__}: {e}")
+                log.warning("grant discovery in database %r failed: %s: %s", db, type(e).__name__, e)
         return Discovery(PARTIAL if failed else COMPLETE, resources, "; ".join(failed))
 
     def apply(self, session, op: Op):
@@ -375,6 +399,8 @@ class PostgreSQLAdapter(Adapter):
             if op.kind == "Grant":
                 self._apply_grant(session, op, sql)
             elif op.kind == "Database":
+                if op.action == DELETE:  # DROP DATABASE scheitert an offenen Verbindungen
+                    _close_databases(session, op.id)
                 _apply_database(session.conn, op, sql)
             else:
                 with session.conn.transaction():
@@ -394,7 +420,8 @@ class PostgreSQLAdapter(Adapter):
                 raise PermanentError(f"invalid privileges for {on}")
             return sql.SQL(", ").join(sql.SQL(p) for p in names)
 
-        with self._database(session, db, write=True) as conn, _mapped(), conn.transaction():
+        conn = self._database(session, db)
+        with _mapped(), conn.transaction():
             if op.action == DELETE:
                 # nur die beobachteten Rechte: ALL PRIVILEGES träfe auch nicht verwaltete Einzeltabellen-Grants
                 conn.execute(sql.SQL("REVOKE {} ON {} FROM {}").format(privileges(attrs["privileges"]), obj, grantee))
@@ -426,6 +453,12 @@ class PostgreSQLAdapter(Adapter):
         finally:
             with suppress(Exception):  # bricht die Verbindung ab, gibt PostgreSQL die Sperre selbst frei
                 session.conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+
+
+def _close_databases(session: Session, dbname: str | None = None) -> None:
+    for key in [k for k in session.databases if dbname in (None, k)]:
+        with suppress(Exception):
+            session.databases.pop(key).close()
 
 
 def _grants(conn, db: str, scope: dict | None) -> list[Resource]:
