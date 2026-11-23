@@ -127,12 +127,13 @@ Jede Regel geht als eigenes Argument an `ACL SETUSER` (kein Zusammenbauen von St
 - **Prüfen** (`passwordPolicy: verify`): `ACL GETUSER` liefert SHA-256-Hashes der Passwörter.
   Ordivus vergleicht `sha256(secret)` mit dieser Liste, **ohne Login-Versuch**. Ein Benutzer mit
   `nopass` gilt als „Passwort weicht ab“ und bekommt ein `SET_PASSWORD`.
-- Die Hashes landen nie in Reports oder Attributen; sie leben nur im Speicher des laufenden Prozesses.
+- Die Hashes werden bei der Prüfung über die Session gelesen und nirgends gespeichert, auch nicht in
+  Reports oder Attributen.
 
 ## Geschützte Benutzer
 
 `default` und der Benutzer aus `spec.username` sind Systemobjekte: nicht deklariert → `IGNORE`, nie
-gelöscht; deklariert und abweichend → `BLOCKED`. Der Adapter verweigert Änderungen an ihnen auch
+gelöscht; deklariert → `BLOCKED`. Der Adapter verweigert Änderungen an ihnen auch
 direkt.
 
 ## Benötigte Rechte
@@ -175,8 +176,9 @@ selbst gepflegt werden; Ordivus meldet die Abweichung beim nächsten `drift`.
 - Redis Cluster: ACLs sind pro Knoten. Jeder Knoten muss als eigenes Target konfiguriert werden.
 - Kein Lock: zwei gleichzeitige `apply`-Läufe gegen denselben Server sind nicht gegeneinander
   abgesichert.
-- `verify` braucht die Hashes aus der Discovery desselben Laufs; ohne sie ist das Ergebnis `UNKNOWN`
-  (kein Login-Fallback).
+- `verify` braucht `ACL GETUSER`; ist das nicht erlaubt, ist das Ergebnis `UNKNOWN` (kein Login-Fallback).
+- Ohne `tls` gilt die Verbindung als unsicher (Warnung, `insecureTransport: true`; mit Operator Policy
+  `requireTls: true` Abbruch, Exit-Code 11).
 
 ## Valkey
 

@@ -34,6 +34,11 @@ def connect(user="root", password=ROOT_PASSWORD):
                            connect_timeout=3, autocommit=True)
 
 
+def escaped(db):
+    """Datenbankname, wie ihn GRANT auf Datenbankebene ohne Wildcard-Wirkung braucht."""
+    return db.replace("_", "\\_")
+
+
 def sql(statement, *args):
     with closing(connect()) as c, c.cursor() as cur:
         cur.execute(statement, args or None)
@@ -144,7 +149,7 @@ def test_plan_apply_converge_and_login(my):
     assert mutating(rep) == [] and rep["targets"][0]["status"] == "in_sync"
 
     # Drift: Privileg entzogen, Rolle entzogen → UPDATE stellt es wieder her
-    sql(f"REVOKE INSERT ON {quote_ident(p + 'app')}.* FROM %s@'%%'", f"{p}reader")
+    sql(f"REVOKE INSERT ON {quote_ident(escaped(p + 'app'))}.* FROM %s@'%%'", f"{p}reader")
     sql("REVOKE %s@'%%' FROM %s@'%%'", f"{p}reader", f"{p}app")
     rep = run(path, "apply")
     assert {a[2] for a in mutating(rep)} == {"UPDATE"} and report.exit_code(rep) == 0
@@ -166,7 +171,7 @@ def test_undeclared_unmanaged_survives_additive(my):
 def test_authoritative_deletes_only_in_scope(my):
     p = my.prefix
     sql("CREATE USER %s@'%%' IDENTIFIED BY 'x-doomed-1'", f"{p}doomed")
-    sql(f"GRANT SELECT ON {quote_ident(p + 'gone')}.* TO %s@'%%'", f"{p}doomed")
+    sql(f"GRANT SELECT ON {quote_ident(escaped(p + 'gone'))}.* TO %s@'%%'", f"{p}doomed")
     sql("CREATE ROLE %s", f"{p}doomedrole")
     sql(f"CREATE DATABASE {quote_ident(p + 'gone')}")
     sql("CREATE USER %s@'%%' IDENTIFIED BY 'x-keep-1'", f"{p}keep")  # außerhalb des Policy-Scopes
@@ -263,14 +268,14 @@ def test_lock_is_exclusive(my):
             m.LOCK_TIMEOUT = old
 
 
-def test_account_as_user_and_role_fails_cleanly(my):
+def test_account_as_user_and_role_is_config_error(my):
     p = my.prefix
     (my.secrets / "dup").write_text("dup-password-123")
     path = my(doc("DatabaseRole", "r", targetRef="my", identity={"username": f"{p}dup"}),
               doc("Credential", "dup", providerRef="files", path="dup"), user_doc(f"{p}dup", "dup"))
-    rep = run(path, "apply")
-    op = next(o for o in rep["operations"] if o["kind"] == "DatabaseUser" and o["action"] == "CREATE")
-    assert op["status"] == "failed" and "both DatabaseUser and DatabaseRole" in op["reason"]
+    with pytest.raises(config.ConfigError, match="both DatabaseRole and DatabaseUser"):
+        run(path, "plan")
+    assert main(["apply", "-f", str(path)]) == 12
 
 
 def test_secret_canary_never_in_output(my, capsys):
@@ -335,3 +340,26 @@ def test_table_grant_and_grant_option_converge(my):
     rep = run(path, "apply")
     assert ("Grant", f"{p}w@% ON `{p}d`.`or.ders`", "CREATE") in actions(rep) and report.exit_code(rep) == 0
     assert mutating(run(path, "apply")) == []
+
+
+def test_database_grant_is_not_a_wildcard(my):
+    p = my.prefix
+    for db in (f"{p}app_db", f"{p}appXdb"):
+        sql(f"CREATE DATABASE {quote_ident(db)}")
+        sql(f"CREATE TABLE {quote_ident(db)}.t (i int)")
+    (my.secrets / "w").write_text("wildcard-pw-123")
+    path = my(doc("Credential", "w", providerRef="files", path="w"), user_doc(f"{p}w", "w"),
+              doc("Grant", "g", targetRef="my", grantee=f"{p}w", on="database", database=f"{p}app_db",
+                  privileges=["SELECT"]))
+    assert report.exit_code(run(path, "apply")) == 0
+    assert mutating(run(path, "plan")) == []  # Escapes beim Lesen entfernt: konvergiert
+    with closing(connect(f"{p}w", "wildcard-pw-123")) as c, c.cursor() as cur:
+        cur.execute(f"SELECT * FROM {quote_ident(p + 'app_db')}.t")
+        with pytest.raises(Exception, match="1142|denied"):
+            cur.execute(f"SELECT * FROM {quote_ident(p + 'appXdb')}.t")
+    # fremder Wildcard-Grant auf dasselbe Muster: nicht änderbar und nie mit dem exakten Grant verwechselt
+    sql(f"GRANT INSERT ON {quote_ident(p + 'app_db')}.* TO %s@'%%'", f"{p}w")
+    rep = run(path, "plan")
+    wild = next(o for o in rep["operations"] if o["id"].endswith("(wildcard pattern)"))
+    assert wild["action"] == "UNMANAGED" and wild["manageable"] is False
+    assert mutating(rep) == []

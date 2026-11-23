@@ -97,3 +97,16 @@ def test_digest_independent_of_file_and_key_order(tmp_path):
     (two / "a.yaml").write_text(HEAD + "metadata:\n  name: c\n")
     assert config.digest(config.load(one)) != config.digest(config.load(two))
 
+
+
+def test_configmap_mount_hidden_dirs_skipped(tmp_path):
+    """Kubernetes-ConfigMap-Layout: Dateien als Symlinks auf ..data → ..<zeitstempel>/."""
+    text = "apiVersion: ordivus.dev/v1alpha1\nkind: Target\nmetadata:\n  name: t\nspec: {}\n"
+    stamp = tmp_path / "..2026_11_23_10_00_00.123"
+    stamp.mkdir()
+    (stamp / "a.yaml").write_text(text)
+    (tmp_path / "..data").symlink_to(stamp.name)
+    (tmp_path / "a.yaml").symlink_to("..data/a.yaml")
+    (tmp_path / ".hidden.yaml").write_text("not: [valid")
+    docs = config.load(tmp_path)
+    assert [d.path.name for d in docs] == ["a.yaml"] and docs[0].path.parent == tmp_path

@@ -173,6 +173,9 @@ class ArcadeDBAdapter(Adapter):
         attrs = {"databases": _groups(spec["databases"])} if "databases" in spec else {}
         return Resource(doc["kind"], name, attrs)
 
+    def insecure_transport(self, target):
+        return target["endpoint"].get("tls") is None  # ohne tls: http://
+
     @contextmanager
     def connect(self, target, secret, write):
         base, context = _base(target)
@@ -231,7 +234,7 @@ class ArcadeDBAdapter(Adapter):
         elif op.action == DELETE:
             self._request(session, "DELETE", users, query=name, ok=(404,))
 
-    def verify_password(self, target, resource, password):
+    def verify_password(self, session, target, resource, password):
         if ":" in resource.id:  # Basic Auth trennt am ersten ':'; Login mit diesem Namen nicht prüfbar
             return None
         base, context = _base(target)

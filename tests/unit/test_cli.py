@@ -90,3 +90,21 @@ def test_policy_exit_codes(cfg, tmp_path, capsys):
     assert main(["plan", "-f", str(env), "--policy", str(dev)]) == ExitCode.OK
     err = capsys.readouterr().err
     assert "development only" in err and "not allowed by operator policy" in err
+
+
+def test_sigterm_exits_143_and_restores_handler(cfg, monkeypatch):
+    import os
+    import signal
+    import time
+
+    from ordivus.core import engine
+
+    def slow_run(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)  # wird vom Handler unterbrochen
+        raise AssertionError("not interrupted")
+
+    monkeypatch.setattr(engine, "run", slow_run)
+    before = signal.getsignal(signal.SIGTERM)
+    assert main(["apply", "-f", str(cfg())]) == ExitCode.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) == before

@@ -109,9 +109,7 @@ spec:
                 seccompProfile: {type: RuntimeDefault}
               resources: {{- toYaml $v.resources | nindent 16 }}
               volumeMounts:
-                # shortcut: subPath ..data blendet die versteckten Atomic-Writer-Verzeichnisse der ConfigMap aus,
-                # sonst liest der rekursive Config-Loader jede Datei doppelt; entfernen, sobald der Loader Punkt-Pfade ignoriert.
-                - {name: config, mountPath: /config, subPath: ..data, readOnly: true}
+                - {name: config, mountPath: /config, readOnly: true}
                 - {name: tmp, mountPath: /tmp}
                 {{- if $policy }}
                 - {name: policy, mountPath: /policy, readOnly: true}

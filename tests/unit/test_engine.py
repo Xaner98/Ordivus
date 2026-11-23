@@ -125,7 +125,7 @@ def test_absent_secret_planned_then_created_once(cfg, fake):
     assert actions(rep)[0] == ("Credential", "pw", "CREATE_SECRET")
     assert [a for a in actions(rep) if a[2] == "CREATE_SECRET"] == [("Credential", "pw", "CREATE_SECRET")]
     create = next(o for o in rep["operations"] if o["id"] == "u1")
-    assert create["changes"]["password"] == {"old": None, "new": "<redacted>"}
+    assert "password" not in create["changes"]  # Passwort nur über CREATE_SECRET/SET_PASSWORD sichtbar
     assert list(cfg.secrets.iterdir()) == []
     run(path, "apply")
     secret = cfg.secrets / "u1"
@@ -181,6 +181,8 @@ def test_unknown_provider_state_changes_no_password(cfg, fake, tmp_path):
     path = cfg(gone, doc("Credential", "pw", providerRef="gone", path="u1"), user(), user("new"))
     rep = run(path, "apply")
     assert ("Credential", "pw", "UNKNOWN") in actions(rep) and ("FakeUser", "new", "BLOCKED") in actions(rep)
+    cred = next(o for o in rep["operations"] if o["kind"] == "Credential")
+    assert "directory missing" in cred["reason"]  # Begründung des Providers im Report
     assert fake.calls == [] and fake.store["i1"]["FakeUser"]["u1"]["password"] == "old"
     assert report.exit_code(rep) == ExitCode.TARGET
     assert not (tmp_path / "missing").exists()
@@ -268,3 +270,66 @@ def test_file_provider_states(tmp_path):
     if os.geteuid() != 0:  # root ignoriert Dateirechte
         (tmp_path / "locked").mkdir(mode=0)
         assert FileProvider({"directory": str(tmp_path / "locked")}).state({"path": "x"}) == "unknown"
+
+
+def test_declared_protected_or_unmanageable_is_blocked(cfg, fake):
+    fake.put("i1", "FakeItem", "sys", {"size": 1}, system=True)
+    fake.put("i1", "FakeItem", "native", {"size": 1}, manageable=False)
+    fake.put("i1", "FakeItem", "other", manageable=False)
+    path = cfg(doc("FakeItem", "sys", targetRef="t1", attrs={"size": 1}),
+               doc("FakeItem", "native", targetRef="t1", attrs={"size": 1}), doc("FakeItem", "new", targetRef="t1"))
+    rep = run(path, "apply")
+    ops = {o["id"]: o for o in rep["operations"]}
+    assert ops["sys"]["action"] == ops["native"]["action"] == "BLOCKED"  # auch ohne Abweichung nie NOOP
+    assert ops["sys"]["system"] is True and ops["native"]["manageable"] is False
+    assert ops["other"]["action"] == "UNMANAGED" and ops["other"]["manageable"] is False
+    assert ops["new"]["status"] == "succeeded" and fake.calls == [("i1", "CREATE", "FakeItem", "new")]
+    assert report.exit_code(rep) == ExitCode.POLICY and report.exit_code(run(path, "plan")) == 0
+
+
+def test_check_hook_blocks_in_plan(cfg, fake, monkeypatch):
+    monkeypatch.setattr(fake, "check", lambda self, session, r: "reserved name" if r.id == "a" else None)
+    path = cfg(doc("FakeItem", "a", targetRef="t1"), doc("FakeItem", "b", targetRef="t1"))
+    op = run(path, "plan")["operations"][0]
+    assert (op["action"], op["reason"]) == ("BLOCKED", "reserved name")
+    run(path, "apply")
+    assert fake.calls == [("i1", "CREATE", "FakeItem", "b")]
+
+
+def test_validate_target_is_config_error(cfg, fake, monkeypatch):
+    monkeypatch.setattr(fake, "validate_target", lambda self, spec, resources: [f"{len(resources)} seen"])
+    with pytest.raises(ConfigError) as e:
+        engine.prepare(config.load(cfg(doc("FakeItem", "a", targetRef="t1"), doc("FakeItem", "b", targetRef="t1"))))
+    assert e.value.errors == [f"{cfg.secrets.parent / 'config' / '00.json'}:1: target 't1': 2 seen"]
+
+
+def test_dependencies_order_and_cycle(cfg, fake, monkeypatch):
+    monkeypatch.setattr(fake, "dependencies",
+                        lambda self, r: [(r.kind, d) for d in r.attrs.get("after", [])])
+    fake.put("i1", "FakeItem", "x")
+    fake.put("i1", "FakeItem", "y", {"after": ["x"]})
+    path = cfg(AUTHORITATIVE, doc("FakeItem", "a", targetRef="t1", attrs={"after": ["c"]}),
+               doc("FakeItem", "b", targetRef="t1"), doc("FakeItem", "c", targetRef="t1"),
+               doc("FakeItem", "d", targetRef="t1", attrs={"after": ["e"]}),
+               doc("FakeItem", "e", targetRef="t1", attrs={"after": ["d"]}))
+    rep = run(path, "apply", allowAuthoritative=True, allowDelete=True)
+    # Abhängigkeit zuerst (sonst Namensordnung); Löschen umgekehrt; Zyklus d <-> e nie ausgeführt
+    assert [(c[1], c[3]) for c in fake.calls] == [("CREATE", "b"), ("CREATE", "c"), ("CREATE", "a"),
+                                                  ("DELETE", "y"), ("DELETE", "x")]
+    blocked = {o["id"]: o["reason"] for o in rep["operations"] if o["action"] == "BLOCKED"}
+    assert set(blocked) == {"d", "e"} and "dependency cycle" in blocked["d"]
+    assert report.exit_code(rep) == ExitCode.POLICY
+
+
+def test_insecure_transport_warns_or_is_refused(cfg, fake, monkeypatch, tmp_path, caplog):
+    path = cfg(doc("FakeItem", "a", targetRef="t1"))
+    assert "insecureTransport" not in run(path, "plan")["targets"][0]
+    monkeypatch.setattr(fake, "insecure_transport", lambda self, spec: True)
+    rep = run(path, "plan")
+    assert rep["targets"][0]["insecureTransport"] is True and "insecure transport" in caplog.text
+    with pytest.raises(PolicyError, match="requireTls"):
+        run(path, "plan", requireTls=True)
+    strict = tmp_path / "strict.yaml"
+    strict.write_text("requireTls: true\n")
+    assert main(["apply", "-f", str(path), "--policy", str(strict)]) == ExitCode.POLICY
+    assert fake.calls == []

@@ -11,7 +11,7 @@ import fnmatch
 import re
 import ssl
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ordivus.adapters.base import (
     COMPLETE,
@@ -61,11 +61,21 @@ def _norm_privs(privs) -> list[str]:
     return sorted({" ".join(p.split()).upper() for p in privs})
 
 
-def _grant_object(attrs: dict) -> str:
+def _grant_object(attrs: dict, statement: bool = False) -> str:
+    """``db.*``/``db.tbl``/``*.*``; ``statement``: Datenbankname für GRANT/REVOKE auf Datenbankebene escapen."""
     if attrs["on"] == "global":
         return "*.*"
     table = quote_ident(attrs["table"]) if attrs["on"] == "table" else "*"
-    return f"{quote_ident(attrs['database'])}.{table}"
+    db = attrs["database"]
+    if statement and attrs["on"] == "database":
+        db = re.sub(r"([\\_%])", r"\\\1", db)  # _ und % sind dort Wildcards: app_db träfe sonst auch appXdb
+    return f"{quote_ident(db)}.{table}"
+
+
+def _db_pattern(raw: str) -> tuple[str, bool]:
+    """``mysql.db.Db`` → (Name ohne Escapes, enthält unescapte Wildcards ``_``/``%``)."""
+    tokens = re.findall(r"\\.|.", raw, re.S)
+    return "".join(t[-1] for t in tokens), any(t in ("_", "%") for t in tokens)
 
 
 def _grant_resource(grantee: str, level: str, privs, db=None, table=None, **flags) -> Resource:
@@ -240,6 +250,20 @@ class MySQLAdapter(Adapter):
             attrs["accountLocked"] = spec["accountLocked"]
         return Resource(kind, rid, attrs)
 
+    def validate_target(self, target, resources):
+        roles = {r.id for r in resources if r.kind == "DatabaseRole"}  # Rolle und User sind dasselbe Konto
+        return [f"account {r.id!r} is declared as both DatabaseRole and DatabaseUser"
+                for r in resources if r.kind == "DatabaseUser" and r.id in roles]
+
+    def dependencies(self, resource):
+        # GRANT role TO user: als Rolle darf auch ein anderer DatabaseUser dienen
+        if resource.kind != "DatabaseUser":
+            return []
+        return [(kind, role) for role in resource.attrs.get("roles", []) for kind in ("DatabaseRole", "DatabaseUser")]
+
+    def insecure_transport(self, target):
+        return (target["endpoint"].get("tls") or {}).get("mode", "verify-full") in ("disable", "require")
+
     # --- Verbindung -----------------------------------------------------------------------------
 
     @contextmanager
@@ -338,10 +362,10 @@ class MySQLAdapter(Adapter):
     def _grants(self, session, scope, accounts) -> list[Resource]:
         by_key: dict[tuple, set] = {}  # (grantee, level, db, table) -> privileges
 
-        def add(user, host, level, privs, db=None, table=None):
+        def add(user, host, level, privs, db=None, table=None, wildcard=False):
             gid = _id(user, host)
             if gid in accounts and (db is None or self._in(scope, "databases", db)) and privs:
-                by_key.setdefault((gid, level, db, table), set()).update(privs)
+                by_key.setdefault((gid, level, db, table, wildcard), set()).update(privs)
 
         def column_privs(row: dict):
             return [COLUMN_PRIVS.get(c[:-5], c[:-5].replace("_", " ").upper())
@@ -352,15 +376,21 @@ class MySQLAdapter(Adapter):
         for user, host, priv in self._run(session, "SELECT USER, HOST, PRIV FROM mysql.global_grants"):
             add(user, host, "global", [priv])
         for row in self._dicts(session, "SELECT * FROM mysql.db"):
-            add(row["User"], row["Host"], "database", column_privs(row), row["Db"])
+            db, wildcard = _db_pattern(row["Db"])
+            add(row["User"], row["Host"], "database", column_privs(row), row["Db"] if wildcard else db,
+                wildcard=wildcard)
         for user, host, db, table, privs in self._run(
                 session, "SELECT User, Host, Db, Table_name, Table_priv FROM mysql.tables_priv"):
             privs = privs if isinstance(privs, str) else ",".join(privs)  # SET-Spalte
             names = ["GRANT OPTION" if p == "Grant" else p.upper() for p in privs.split(",") if p]
             add(user, host, "table", names, db, table)
-        return [_grant_resource(gid, level, privs, db, table, system=accounts[gid][0] in SYSTEM_USERS,
-                                manageable=gid != session.current)
-                for (gid, level, db, table), privs in sorted(by_key.items(), key=lambda kv: str(kv[0]))]
+        out = []
+        for (gid, level, db, table, wildcard), privs in sorted(by_key.items(), key=lambda kv: str(kv[0])):
+            grant = _grant_resource(gid, level, privs, db, table, system=accounts[gid][0] in SYSTEM_USERS,
+                                    manageable=gid != session.current and not wildcard)
+            # fremder Wildcard-Grant (z. B. app_db als Muster): eigenes, nicht änderbares Objekt, nie "gleich" app_db
+            out.append(replace(grant, id=grant.id + " (wildcard pattern)") if wildcard else grant)
+        return out
 
     def _dicts(self, session, sql):
         import pymysql
@@ -401,7 +431,7 @@ class MySQLAdapter(Adapter):
             return run(f"CREATE ROLE {me}" if op.action == CREATE else f"DROP ROLE {me}")
         if op.kind == "Grant":
             attrs = (op.observed if op.action == DELETE else op.desired).attrs
-            obj, grantee = _grant_object(attrs), acct(attrs["grantee"])
+            obj, grantee = _grant_object(attrs, statement=True), acct(attrs["grantee"])
             if op.action == CREATE:
                 return run(f"GRANT {self._privs(attrs['privileges'])} ON {obj} TO {grantee}")
             if op.action == DELETE:
@@ -448,7 +478,7 @@ class MySQLAdapter(Adapter):
             raise PermanentError("invalid privilege name")
         return ", ".join(privs)
 
-    def verify_password(self, target, resource, password: Secret):
+    def verify_password(self, session, target, resource, password: Secret):
         import pymysql
 
         name, host = account(resource.id)

@@ -48,7 +48,7 @@ def snapshot():
 
 
 def can_login(user, password):
-    return CH.verify_password({"endpoint": ENDPOINT}, Resource("DatabaseUser", user), Secret(password))
+    return CH.verify_password(None, {"endpoint": ENDPOINT}, Resource("DatabaseUser", user), Secret(password))
 
 
 @pytest.fixture(autouse=True)
@@ -193,6 +193,7 @@ def test_config_file_user_is_not_manageable(cfg):
     assert "admin" in {r["name"] for r in root("SELECT name FROM system.users FORMAT JSON")}
     op = next(o for o in run(cfg(user("admin")), "plan")["operations"] if o["id"] == "admin")
     assert op["action"] == "BLOCKED" and op["reason"] == "not manageable by adapter"
+    assert op["manageable"] is False and "sqlManaged" not in op["changes"]  # Engine sperrt, kein Hilfsfeld
 
 
 def test_identifier_injection_is_quoted(cfg):

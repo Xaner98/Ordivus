@@ -15,7 +15,7 @@ spec:
   endpoint:
     host: arcadedb.data-platform.svc.cluster.local
     port: 2480            # Default 2480
-    tls:                  # vorhanden → https; ohne tls → http
+    tls:                  # vorhanden → https; ohne tls → http (unsicher, siehe requireTls)
       caFile: /trust/ca.pem   # optional, sonst System-CAs
   username: root          # Default root
   authentication:

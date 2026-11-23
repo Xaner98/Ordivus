@@ -39,7 +39,7 @@ def databases():
 
 
 def can_login(name, password):
-    return ArcadeDBAdapter().verify_password(TARGET, Resource("DatabaseUser", name), Secret(password))
+    return ArcadeDBAdapter().verify_password(None, TARGET, Resource("DatabaseUser", name), Secret(password))
 
 
 def doc(kind, name, **spec):

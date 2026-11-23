@@ -231,10 +231,9 @@ class ClickHouseAdapter(Adapter):
         if kind == "Database":
             return Resource(kind, name, {k: spec[k] for k in ("engine",) if k in spec})
         if kind == "DatabaseRole":
-            return Resource(kind, name, {"sqlManaged": True})
+            return Resource(kind, name)
         if kind == "DatabaseUser":
-            # sqlManaged: Workaround, damit ein deklarierter users.xml-Benutzer immer BLOCKED wird, nie NOOP
-            attrs = {"sqlManaged": True, **{k: sorted(set(spec[k])) for k in FIELDS[kind] if k in spec}}
+            attrs = {k: sorted(set(spec[k])) for k in FIELDS[kind] if k in spec}
             if "::/0" in attrs.get("hostIp", []):  # ClickHouse speichert ANY nur als ::/0
                 attrs["hostIp"] = ["::/0"]
             return Resource(kind, name, attrs)
@@ -242,6 +241,9 @@ class ClickHouseAdapter(Adapter):
         return Resource(kind, grant_id(grantee, db, table), {
             "grantee": grantee, "database": db, "table": table,
             "privileges": sorted({privilege(p) for p in spec["privileges"]})})
+
+    def insecure_transport(self, target):
+        return target["endpoint"].get("tls") is None  # ohne tls: http://
 
     @contextmanager
     def connect(self, target, secret, write):
@@ -265,8 +267,8 @@ class ClickHouseAdapter(Adapter):
                      "FORMAT JSON")}
         if kind == "DatabaseRole":
             rows = _post(session, "SELECT name, storage FROM system.roles FORMAT JSON")
-            return Discovery(COMPLETE, [Resource(kind, r["name"], {"sqlManaged": r["storage"] in SQL_STORAGES},
-                                                 manageable=r["storage"] in SQL_STORAGES) for r in rows])
+            return Discovery(COMPLETE, [Resource(kind, r["name"], manageable=r["storage"] in SQL_STORAGES)
+                                        for r in rows])
         if kind == "DatabaseUser":
             grants = _post(session, "SELECT user_name, granted_role_name, granted_role_is_default "
                                     "FROM system.role_grants WHERE user_name IS NOT NULL FORMAT JSON")
@@ -277,7 +279,6 @@ class ClickHouseAdapter(Adapter):
                 mine = [g for g in grants if g["user_name"] == u["name"]]
                 manageable = u["storage"] in SQL_STORAGES
                 out.append(Resource(kind, u["name"], {
-                    "sqlManaged": manageable,
                     "roles": sorted(g["granted_role_name"] for g in mine),
                     "defaultRoles": sorted(g["granted_role_name"] for g in mine if g["granted_role_is_default"]),
                     "hostIp": sorted(u["host_ip"]), "hostNames": sorted(u["host_names"]),
@@ -376,7 +377,7 @@ class ClickHouseAdapter(Adapter):
     def _default_roles(session, user, roles):
         _post(session, f"SET DEFAULT ROLE {_roles(roles) if roles else 'NONE'} TO {qi(user)}")
 
-    def verify_password(self, target, resource, password):
+    def verify_password(self, session, target, resource, password):
         if ":" in resource.id:
             return None  # Basic Auth kann diesen Namen nicht übertragen
         try:

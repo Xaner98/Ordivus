@@ -69,9 +69,9 @@ Nie geändert oder gelöscht werden:
 - alle Policies des verwendeten Tokens (`GET auth/token/lookup-self`: `policies` und
   `identity_policies`) – Ordivus kann sich so weder neue Rechte geben noch aussperren.
 
-Deklariert und abweichend → `BLOCKED`; nicht deklariert → `IGNORE`, auch im authoritative Mode.
-Eine geschützte Policy, die noch nicht existiert, würde als `CREATE` geplant; `apply` verweigert
-sie dann mit einem Fehler.
+Deklariert → `BLOCKED` (auch ohne Abweichung und auch, wenn sie noch nicht existiert); nicht
+deklariert → `IGNORE`, auch im authoritative Mode. `apply` endet dann mit Exit-Code 11; die übrigen
+Policies werden trotzdem geschrieben.
 
 Diese Sperre ist eine zweite Verteidigungslinie. Die eigentliche Grenze ist die OpenBao-Policy
 des Apply-Tokens: Schreibrechte nur auf einen Namensbereich, z. B.

@@ -261,6 +261,20 @@ class PostgreSQLAdapter(Adapter):
         attrs["privileges"] = sorted({_privilege(p) for p in spec["privileges"]})
         return Resource(kind, _grant_id(attrs), attrs)
 
+    def validate_target(self, target, resources):
+        roles = {r.id for r in resources if r.kind == "DatabaseRole"}  # beides ist dieselbe native Rolle
+        return [f"role {r.id!r} is declared as both DatabaseRole and DatabaseUser"
+                for r in resources if r.kind == "DatabaseUser" and r.id in roles]
+
+    def dependencies(self, resource):
+        # GRANT parent TO member braucht die Elternrolle; sie kann DatabaseRole oder DatabaseUser sein
+        if resource.kind not in ROLE_KINDS:
+            return []
+        return [(kind, parent) for parent in resource.attrs.get("memberOf", []) for kind in ROLE_KINDS]
+
+    def insecure_transport(self, target):
+        return target["endpoint"].get("tls", {}).get("mode", "prefer") not in ("verify-ca", "verify-full")
+
     @contextmanager
     def connect(self, target, secret, write):
         with _open(_params(target, secret, read_only=not write)) as conn:
@@ -335,7 +349,7 @@ class PostgreSQLAdapter(Adapter):
             if extra:
                 conn.execute(sql.SQL("REVOKE {} ON {} FROM {}").format(privileges(extra), obj, grantee))
 
-    def verify_password(self, target, resource, password):
+    def verify_password(self, session, target, resource, password):
         try:
             with _open(_params(target, password, user=resource.id)):
                 return True

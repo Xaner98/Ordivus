@@ -30,10 +30,14 @@ def _op(op: Op) -> dict:
     changes = {f: {"old": old, "new": new} for f, (old, new) in op.changes.items()}
     if op.action == CREATE and op.desired:
         changes = {f: {"old": None, "new": v} for f, v in sorted(op.desired.attrs.items())}
-    if op.desired and op.desired.password_ref and op.action in (CREATE, SET_PASSWORD):
-        changes["password"] = {"old": None if op.action == CREATE else REDACTED, "new": REDACTED}
+    if op.action == SET_PASSWORD:  # Passwörter nur über SET_PASSWORD/CREATE_SECRET sichtbar, nie bei CREATE
+        changes["password"] = {"old": REDACTED, "new": REDACTED}
     out = {"target": op.target, "kind": op.kind, "id": op.id, "action": op.action, "status": op.status,
            "changes": changes}
+    if op.observed and not op.observed.manageable:
+        out["manageable"] = False
+    if op.observed and op.observed.system:
+        out["system"] = True
     return {**out, "reason": op.reason} if op.reason else out
 
 
@@ -82,7 +86,8 @@ def exit_code(report: dict, fail_on: str | None = None) -> int:
         return 14
     if summary["targetErrors"] or (apply and any(o["kind"] == "Credential" and o["action"] == UNKNOWN for o in ops)):
         return 13
-    if apply and any(o["status"] == "denied" for o in ops):
+    # BLOCKED gibt es in apply nur an deklarierten Ressourcen (Authoritative-Verbot bricht vorher ab)
+    if apply and any(o["status"] == "denied" or o["action"] == BLOCKED for o in ops):
         return 11
     actions = summary["actions"]
     exceeded = {

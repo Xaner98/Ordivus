@@ -195,13 +195,13 @@ def test_wrong_password_is_reset_with_verify_and_canary_never_leaks(pg, capsys):
                       credentials={"credentialRef": "u-pw", "passwordPolicy": "verify"}))
     adapter = PostgreSQLAdapter()
     observed = Resource("DatabaseUser", p + "u")
-    assert adapter.verify_password(pg.target(), observed, Secret(canary)) is False
+    assert adapter.verify_password(None, pg.target(), observed, Secret(canary)) is False
 
     assert main(["plan", "-f", str(path), "--format", "json"]) in (0, 10)
     plan = run(path, "plan")
     assert ("DatabaseUser", p + "u", "SET_PASSWORD") in actions(plan)
     assert main(["apply", "-f", str(path), "--format", "json"]) == 0
-    assert adapter.verify_password(pg.target(), observed, Secret(canary)) is True
+    assert adapter.verify_password(None, pg.target(), observed, Secret(canary)) is True
     with connect(p + "u", canary):
         pass
     again = run(path, "apply")
@@ -210,7 +210,7 @@ def test_wrong_password_is_reset_with_verify_and_canary_never_leaks(pg, capsys):
     assert canary not in out.out + out.err + json.dumps(plan) + json.dumps(again)
 
     pg.sql("CREATE ROLE {} NOLOGIN PASSWORD 'x'", p + "nl")  # Login aus anderem Grund unmöglich → None
-    assert adapter.verify_password(pg.target(), Resource("DatabaseUser", p + "nl"), Secret("x")) is None
+    assert adapter.verify_password(None, pg.target(), Resource("DatabaseUser", p + "nl"), Secret("x")) is None
 
 
 def test_read_only_session_cannot_mutate(pg):
@@ -288,3 +288,19 @@ def test_validation_without_connection():
     assert errors("Grant", grantee="g", database="d", on="schema", schema="s", privileges=["SELECT"]) \
         == ["spec.privileges: 'SELECT' is not one of ['CREATE', 'USAGE']"]
     assert errors("Grant", grantee="g", database="d", on="database", privileges=["temp"]) == []
+
+
+def test_member_before_parent_converges_in_one_apply(pg):
+    member, parent = pg.p + "a_member", pg.p + "z_parent"  # Namensordnung wäre falsch herum
+    path = pg.cfg(doc("DatabaseRole", "m", name=member, memberOf=[parent]), doc("DatabaseRole", "p", name=parent))
+    rep = run(path, "apply")
+    assert report.exit_code(rep) == 0, rep["operations"]
+    assert [o["id"] for o in rep["operations"] if o["action"] == "CREATE"] == [parent, member]
+    assert not any(o["action"] in MUTATING for o in run(path, "plan")["operations"])
+
+
+def test_role_and_user_with_same_name_is_config_error(pg):
+    path = pg.cfg(doc("DatabaseRole", "r", name=pg.p + "dup"), doc("DatabaseUser", "u", name=pg.p + "dup"))
+    with pytest.raises(config.ConfigError, match="both DatabaseRole and DatabaseUser"):
+        run(path, "plan")
+    assert main(["plan", "-f", str(path)]) == 12

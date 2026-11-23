@@ -88,7 +88,9 @@ for _tag, _regex, _first in [
 
 def _files(path: Path) -> list[Path]:
     if path.is_dir():
-        return sorted(p for p in path.rglob("*") if p.suffix in SUFFIXES and p.is_file())
+        # Punkt-Pfade auslassen: ConfigMap-Mounts spiegeln jede Datei in ..data/ und ..<zeitstempel>/
+        return sorted(p for p in path.rglob("*") if p.suffix in SUFFIXES and p.is_file()
+                      and not any(part.startswith(".") for part in p.relative_to(path).parts))
     return [path]
 
 

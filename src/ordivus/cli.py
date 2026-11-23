@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import signal
 import sys
 from collections import Counter
 from enum import IntEnum
@@ -98,9 +99,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+class Terminated(BaseException):
+    """SIGTERM; BaseException, damit kein ``except Exception`` der Engine den Abbruch schluckt."""
+
+
+def _terminate(signum, frame):
+    raise Terminated
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    previous = signal.signal(signal.SIGTERM, _terminate)  # Context-Manager (Locks, Sessions) räumen beim Abwickeln auf
     try:
         return args.handler(args)
     except KeyboardInterrupt:
         return ExitCode.SIGINT
+    except Terminated:
+        return ExitCode.SIGTERM
+    finally:
+        signal.signal(signal.SIGTERM, previous)

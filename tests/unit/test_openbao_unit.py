@@ -6,7 +6,7 @@ from ordivus import openbao_http
 from ordivus.adapters.base import Secret, TransientError
 from ordivus.adapters.openbao import OpenBaoAdapter, canonical, render
 from ordivus.credentials import PROVIDERS
-from ordivus.credentials.base import ABSENT, PRESENT, UNKNOWN
+from ordivus.credentials.base import ABSENT, CONFLICT, PRESENT, UNKNOWN
 
 REF = {"providerRef": "bao", "path": "app/db"}
 META, DATA = "secret/metadata/app/db", "secret/data/app/db"
@@ -45,13 +45,14 @@ def provider(tmp_path, responses, calls=None):
     ({("GET", META): (403, {"errors": ["permission denied"]})}, UNKNOWN),
     ({("GET", META): (503, {})}, UNKNOWN),
     ({("GET", META): (200, {"data": {"current_version": 2, "versions": {
-        "2": {"deletion_time": "2026-01-01T00:00:00Z", "destroyed": False}}}})}, UNKNOWN),
-    ({("GET", META): (200, {"data": {"current_version": 1, "versions": {"1": {"destroyed": True}}}})}, UNKNOWN),
+        "2": {"deletion_time": "2026-01-01T00:00:00Z", "destroyed": False}}}})}, CONFLICT),
+    ({("GET", META): (200, {"data": {"current_version": 1, "versions": {"1": {"destroyed": True}}}})}, CONFLICT),
 ])
 def test_state_decision_table(tmp_path, monkeypatch, responses, expected):
     p, fake = provider(tmp_path, responses)
     monkeypatch.setattr(openbao_http, "request", fake)
-    assert p.state(REF) == expected
+    state = p.state(REF)
+    assert state == expected and (state in (PRESENT, ABSENT) or state.reason)  # unknown/conflict mit Begründung
 
 
 def test_timeout_raises_transient_which_engine_maps_to_unknown(tmp_path, monkeypatch):

@@ -5,7 +5,9 @@ Verwaltet Rollen, Benutzer, Datenbanken und eine robuste Teilmenge von Grants in
 
 Kinds in Ausführungsreihenfolge: `DatabaseRole`, `DatabaseUser`, `Database`, `Grant`. Löschungen
 laufen umgekehrt (Grants, dann Datenbanken, dann Benutzer und Rollen). Rollen kommen vor Datenbanken,
-weil `CREATE DATABASE … OWNER` die Rolle bereits braucht.
+weil `CREATE DATABASE … OWNER` die Rolle bereits braucht. Innerhalb davon folgt die Reihenfolge
+`memberOf`: eine Elternrolle (auch ein `DatabaseUser`) entsteht vor ihren Mitgliedern, gelöscht wird
+umgekehrt. Zyklische Mitgliedschaften werden `BLOCKED`.
 
 Vollständiges Beispiel: [`examples/postgresql/`](../../examples/postgresql/ordivus.yaml).
 
@@ -36,7 +38,9 @@ spec:
 ```
 
 Für Produktion `tls.mode: verify-full` mit einer `caFile` aus der Laufzeitumgebung verwenden: Ein
-umgeleiteter Host scheitert dann am Zertifikat, bevor das Passwort gesendet wird.
+umgeleiteter Host scheitert dann am Zertifikat, bevor das Passwort gesendet wird. Jeder andere Modus
+als `verify-ca`/`verify-full` (auch der Default `prefer`) gilt als unsichere Verbindung: Warnung und
+`insecureTransport: true` im Report, mit Operator Policy `requireTls: true` Abbruch (Exit-Code 11).
 
 ## Kind `DatabaseRole` und `DatabaseUser`
 
@@ -193,11 +197,8 @@ ist aber nicht nötig; bei verwalteten Diensten (RDS, Cloud SQL) die dortige Adm
 
 ## Grenzen
 
-- Derselbe Name als `DatabaseRole` und `DatabaseUser` wird bisher erst beim `apply` erkannt
-  (`role … already exists`), nicht schon bei `config validate`.
-- Verschachtelte Rollen werden in Namensreihenfolge angelegt. Ist eine Rolle Mitglied einer Rolle
-  mit alphabetisch späterem Namen, die im selben Lauf neu entsteht, scheitert der erste Lauf; der
-  zweite konvergiert. Benutzer (`DatabaseUser`) in Rollen sind davon nicht betroffen.
+- Derselbe Name als `DatabaseRole` und `DatabaseUser` ist ein Konfigurationsfehler (Exit-Code 12),
+  schon bei `config validate`.
 - `REVOKE` entzieht nur Rechte, die die Apply-Identität selbst vergeben hat. Von anderen Rollen
   vergebene Rechte bleiben bestehen; die Operation wird dann als `unverified` gemeldet.
 - `tables-in-schema` auf einem Schema **ohne Tabellen** ist nicht beobachtbar und bleibt bei jedem

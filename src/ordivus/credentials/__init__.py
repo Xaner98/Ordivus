@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from ordivus.adapters.base import Secret
-from ordivus.credentials.base import ABSENT, PRESENT, UNKNOWN, CredentialError, CredentialProvider
+from ordivus.credentials.base import ABSENT, PRESENT, UNKNOWN, CredentialError, CredentialProvider, State
 from ordivus.credentials.openbao import OpenBaoKV2Provider
 
 log = logging.getLogger("ordivus")
@@ -36,10 +36,17 @@ class FileProvider(CredentialProvider):
     def state(self, ref):
         try:
             file = self._file(ref)
-            return PRESENT if file.is_file() else UNKNOWN if file.exists() else (
-                ABSENT if file.parent.is_dir() and os.access(file.parent, os.R_OK | os.X_OK) else UNKNOWN)
-        except (OSError, CredentialError):
-            return UNKNOWN
+            if file.is_file():
+                return PRESENT
+            if file.exists():
+                return State(UNKNOWN, f"credential {ref['path']!r} exists but is not a regular file")
+            if file.parent.is_dir() and os.access(file.parent, os.R_OK | os.X_OK):
+                return ABSENT
+            return State(UNKNOWN, "credential directory missing or not readable")
+        except CredentialError as e:
+            return State(UNKNOWN, str(e))
+        except OSError as e:
+            return State(UNKNOWN, f"cannot inspect credential {ref['path']!r}: {type(e).__name__}")
 
     def read(self, ref):
         try:
@@ -75,7 +82,7 @@ class EnvProvider(CredentialProvider):
         return _only(spec, set())
 
     def state(self, ref):
-        return PRESENT if ref["path"] in os.environ else ABSENT
+        return PRESENT if ref["path"] in os.environ else State(ABSENT, f"environment variable {ref['path']!r} not set")
 
     def read(self, ref):
         if ref["path"] not in os.environ:

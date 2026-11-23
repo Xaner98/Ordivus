@@ -4,15 +4,13 @@ Ein Credential pro KV-v2-Pfad (F-04), Feld fest ``password``. Getrennt vom Polic
 (``ordivus.adapters.openbao``): eigene Konfiguration, eigene Identität.
 """
 
-import logging
 from pathlib import Path
 from urllib.parse import quote
 
 from ordivus import openbao_http
 from ordivus.adapters.base import AdapterError, Secret
-from ordivus.credentials.base import ABSENT, PRESENT, UNKNOWN, CredentialError, CredentialProvider
+from ordivus.credentials.base import ABSENT, CONFLICT, PRESENT, UNKNOWN, CredentialError, CredentialProvider, State
 
-log = logging.getLogger("ordivus")
 FIELD = "password"
 K8S_JWT = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 # method -> (Pflichtfelder, optionale Felder, Default-Mount)
@@ -110,16 +108,15 @@ class OpenBaoKV2Provider(CredentialProvider):
             if version and not version.get("destroyed") and not version.get("deletion_time"):
                 return PRESENT
             # Metadaten ohne lesbare aktuelle Version: cas=0 schlüge fehl, Wert ist weg → manuell klären.
-            log.warning("credential path %r: current version deleted or destroyed, manual action required",
-                        ref["path"])
-            return UNKNOWN
-        if status != 404:
-            return UNKNOWN  # 403, 5xx, alles andere: kein Beweis für "fehlt"
+            return State(CONFLICT, "current version deleted or destroyed; restore or remove the path manually")
+        if status != 404:  # 403, 5xx, alles andere: kein Beweis für "fehlt"
+            return State(UNKNOWN, f"metadata read returned HTTP {status}")
         paths = [self._path(ref, "metadata"), self._path(ref, "data")]
         status, body = self._call("POST", "sys/capabilities-self", {"paths": paths})
         caps = body.get("data") or body
         readable = status == 200 and all({"read", "root"} & set(caps.get(p) or []) for p in paths)
-        return ABSENT if readable else UNKNOWN
+        return ABSENT if readable else State(UNKNOWN, "metadata not found, but read capability on the path is "
+                                                      "missing or unverifiable")
 
     def read(self, ref):
         try:

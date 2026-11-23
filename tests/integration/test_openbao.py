@@ -15,10 +15,10 @@ from ordivus import adapters, openbao_http
 from ordivus.adapters.base import CREATE, Op, PermanentError, Resource, Secret
 from ordivus.adapters.fake import FakeAdapter
 from ordivus.adapters.openbao import OpenBaoAdapter, canonical, render
-from ordivus.core import config, engine
+from ordivus.core import config, engine, report
 from ordivus.core.policy import OperatorPolicy
 from ordivus.credentials import PROVIDERS
-from ordivus.credentials.base import ABSENT, PRESENT, UNKNOWN
+from ordivus.credentials.base import ABSENT, CONFLICT, PRESENT, UNKNOWN
 
 URL = f"http://{os.environ.get('ORDIVUS_TEST_HOST', 'localhost')}:18200"
 ROOT = os.environ.get("ORDIVUS_TEST_OPENBAO_TOKEN", "ordivus-it-root")
@@ -116,11 +116,25 @@ def test_missing_read_capability_is_unknown_never_absent(tmp_path, uid):
     assert provider(tmp_path, both).state(ref) == ABSENT
 
 
-def test_deleted_current_version_is_unknown(tmp_path, uid):
+def test_deleted_current_version_is_conflict_and_blocked(tmp_path, uid):
     p, ref = provider(tmp_path), {"path": f"it/{uid}/deleted"}
     p.create_if_absent(ref, Secret("x"))
     assert bao("DELETE", f"secret/data/{ref['path']}")[0] == 204
-    assert p.state(ref) == UNKNOWN
+    assert p.state(ref) == CONFLICT and "deleted or destroyed" in p.state(ref).reason
+    adapters.register(FakeAdapter)
+    FakeAdapter.reset()
+    (tmp_path / "token").write_text(ROOT)
+    directory = write_config(tmp_path / "cfg", [
+        doc("Target", "t1", adapter="fake", instance="i1"),
+        doc("CredentialProvider", "bao", type="openbao-kv-v2", endpoint=URL,
+            auth={"method": "token", "tokenFile": str(tmp_path / "token")}),
+        doc("Credential", "pw", providerRef="bao", path=ref["path"]),
+        doc("FakeUser", "u1", targetRef="t1", attrs={}, credentials={"credentialRef": "pw"})])
+    rep = engine.run("apply", config.load(directory), OperatorPolicy(profile="development"))
+    cred = next(o for o in rep["operations"] if o["kind"] == "Credential")
+    assert cred["action"] == "BLOCKED" and "manual action required" in cred["reason"]
+    assert FakeAdapter.calls == [] and versions(ref["path"]) == 1 and report.exit_code(rep) == 11
+    FakeAdapter.reset()
 
 
 def test_approle_login(tmp_path, uid):
@@ -187,7 +201,7 @@ def ops(rep):
 def test_policy_lifecycle_and_self_protection(tmp_path, uid):
     admin = f"it-admin-{uid}"
     token = token_with(admin, ADMIN_HCL)
-    app, guard = f"it-app-{uid}", f"it-guard-{uid}"
+    app, guard, missing = f"it-app-{uid}", f"it-guard-{uid}", f"it-missing-{uid}"
     bao("PUT", f"sys/policies/acl/{guard}", {"policy": 'path "x" { capabilities = ["read"] }'})
     rules = [{"path": f"secret/data/{uid}/*", "capabilities": ["read", "list"]}]
     directory = policy_config(
@@ -196,16 +210,20 @@ def test_policy_lifecycle_and_self_protection(tmp_path, uid):
         doc("OpenBaoPolicy", "self", targetRef="bao", policyName=admin, policy='path "*" { capabilities = ["sudo"] }'),
         doc("OpenBaoPolicy", "guard", targetRef="bao", policyName=guard, policy="# emptied"),
         doc("OpenBaoPolicy", "default", targetRef="bao", policyName="default", policy="# emptied"),
-        protected=[guard])
+        doc("OpenBaoPolicy", "missing", targetRef="bao", policyName=missing, policy="# new"),
+        protected=[guard, missing])
     run = lambda mode: engine.run(mode, config.load(directory), OperatorPolicy())  # noqa: E731
     plan = run("plan")
     assert ops(plan)[app] == "CREATE"
     assert ops(plan)[admin] == ops(plan)[guard] == ops(plan)["default"] == "BLOCKED"  # Self-Escalation/-Lockout
+    blocked = next(o for o in plan["operations"] if o["id"] == missing)  # geschützt, existiert noch nicht
+    assert blocked["action"] == "BLOCKED" and "protected" in blocked["reason"]
     assert "root" not in ops(plan)  # undeclared system policy → IGNORE (only counted)
     assert bao("GET", f"sys/policies/acl/{app}")[0] == 404  # plan schreibt nie
 
     rep = run("apply")
     assert {o["status"] for o in rep["operations"] if o["id"] == app} == {"succeeded"}
+    assert report.exit_code(rep) == 11 and bao("GET", f"sys/policies/acl/{missing}")[0] == 404
     assert bao("GET", f"sys/policies/acl/{admin}")[1]["data"]["policy"] == ADMIN_HCL  # eigene Policy unverändert
     assert canonical(bao("GET", f"sys/policies/acl/{app}")[1]["data"]["policy"]) == render(rules)
     assert ops(run("plan"))[app] == "NOOP"

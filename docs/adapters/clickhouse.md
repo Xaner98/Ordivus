@@ -142,7 +142,7 @@ Der Adapter erkennt die Herkunft über die Spalte `storage` in `system.users`/`s
 | deklariert | `BLOCKED` („not manageable by adapter“), nie stilles `NOOP` |
 | Grants solcher Benutzer/Rollen | ebenfalls `manageable: false` |
 
-Damit eine Deklaration auch bei sonst identischen Feldern `BLOCKED` ergibt, führt der Adapter am Benutzer/an der Rolle das interne Feld `sqlManaged` (im Plan als Änderung `sqlManaged: false -> true` sichtbar). Es ist nicht konfigurierbar.
+Die Engine meldet eine Deklaration solcher Objekte immer als `BLOCKED`, auch wenn alle Felder übereinstimmen.
 
 Typischer Fall: der per `CLICKHOUSE_USER` im offiziellen Container angelegte Admin. Für Ordivus legt man besser einen eigenen SQL-Benutzer an (siehe Rechte) und verbindet sich als dieser.
 

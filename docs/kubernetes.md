@@ -23,6 +23,8 @@ helm install ordivus charts/ordivus -n platform-config \
 
 Die ConfigMap darf auch vom Chart erzeugt werden (`configuration.source: inline`, Dateien unter `configuration.files`). Für GitOps ist eine eigene ConfigMap meist besser, weil sie unabhängig vom Chart aktualisiert werden kann.
 
+Die ConfigMap wird direkt unter `/config` eingehängt (ohne `subPath`). Die versteckten Verzeichnisse, über die Kubernetes die Dateien atomar austauscht (`..data`, `..<zeitstempel>`), überspringt der Config-Loader wie alle Pfade mit führendem Punkt.
+
 **Grenze:** Eine ConfigMap fasst höchstens **1 MiB**. Größere Konfigurationen auf mehrere ConfigMaps verteilen (über `extraVolumes`/`extraVolumeMounts` unter `/config/<unterverzeichnis>` einhängen) oder als Volume aus einer anderen Quelle bereitstellen.
 
 ## Values im Überblick

@@ -105,6 +105,13 @@ class OpenBaoAdapter(Adapter):
         text = spec["policy"] if "policy" in spec else render(spec["rules"])
         return Resource(KIND, spec["policyName"], {"policy": canonical(text)})
 
+    def insecure_transport(self, target):
+        return target["endpoint"]["url"].startswith("http://")
+
+    def check(self, session, resource):
+        # auch noch nicht existierende geschützte Namen schon im Plan sperren, nicht erst beim Schreiben
+        return f"policy {resource.id!r} is protected" if resource.id in session.protected else None
+
     @contextmanager
     def connect(self, target, secret, write):
         if secret is None:

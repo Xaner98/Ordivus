@@ -5,8 +5,9 @@ nur `apply` erzeugt Secrets und ruft `Adapter.apply`.
 """
 
 import fnmatch
+import heapq
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -42,10 +43,12 @@ from ordivus.credentials import PROVIDERS
 from ordivus.credentials.base import (
     ABSENT,
     ALPHABETS,
+    CONFLICT,
     MIN_LENGTH,
     PRESENT,
     CredentialError,
     CredentialProvider,
+    State,
     generate,
 )
 from ordivus.credentials.base import UNKNOWN as CRED_UNKNOWN
@@ -188,11 +191,12 @@ def prepare(docs: list[Document]) -> Model:
         errors += problems
         credentials[doc.name] = Credential(doc.name, spec(doc), providers.get(spec(doc).get("providerRef")))
 
-    targets = {}
+    targets, target_where = {}, {}
     for doc in by_kind["Target"]:
         s = spec(doc)
         adapter = adapters.get(s["adapter"]) if isinstance(s.get("adapter"), str) else None
         target = targets[doc.name] = Target(doc.name, s, adapter)
+        target_where[doc.name] = where(doc)
         if adapter is None:
             errors.append(f"{where(doc)}: unknown adapter {s.get('adapter')!r}")
             continue
@@ -251,6 +255,11 @@ def prepare(docs: list[Document]) -> Model:
         if creds:
             target.password_policy[(resource.kind, resource.id)] = creds.get("passwordPolicy", "verify")
 
+    for name, target in targets.items():  # dokumentübergreifende Prüfung je Target
+        if target.adapter is not None:
+            errors += [f"{target_where[name]}: target {name!r}: {p}"
+                       for p in target.adapter.validate_target(target.spec, target.desired)]
+
     if errors:
         raise ConfigError(errors)
     return Model(targets, credentials, providers)
@@ -270,26 +279,35 @@ def _discover(target: Target, session, kind: str) -> Discovery:
     return found
 
 
-def _state(cred: Credential) -> str:
+def _state(cred: Credential) -> State:
     try:
-        return cred.provider.state(cred.spec)
-    except Exception as e:  # jeder Providerfehler ist "unknown", nie "absent"
-        log.warning("credential %r: state unknown (%s)", cred.name, type(e).__name__)
-        return CRED_UNKNOWN
+        state = cred.provider.state(cred.spec)
+    except (AdapterError, CredentialError) as e:  # jeder Providerfehler ist "unknown", nie "absent"
+        state = State(CRED_UNKNOWN, f"{type(e).__name__}: {e}")
+    except Exception as e:
+        state = State(CRED_UNKNOWN, type(e).__name__)
+    state = state if isinstance(state, State) else State(state)
+    if state in (CRED_UNKNOWN, CONFLICT):
+        log.warning("credential %r: state %s (%s)", cred.name, state, state.reason or "no reason given")
+    return state
 
 
-def _password_ops(target: Target, op: Op, model: Model, policy: OperatorPolicy) -> list[Op]:
+def _password_ops(target: Target, session, op: Op, model: Model, policy: OperatorPolicy) -> list[Op]:
     """Passwort-Operationen für eine deklarierte Ressource mit `spec.credentials` (§10.5, §10.6)."""
     cred = model.credentials[op.desired.password_ref]
     password_policy = target.password_policy[(op.kind, op.id)]
     state, out = _state(cred), []
-    if state == CRED_UNKNOWN:
-        out.append(Op(target.name, "Credential", cred.name, UNKNOWN, reason="credential state unknown"))
+    if state in (CRED_UNKNOWN, CONFLICT):  # conflict: nur manuell lösbar → BLOCKED statt UNKNOWN
+        reason = state.reason or f"credential state {state}"
+        cop = Op(target.name, "Credential", cred.name, UNKNOWN, reason=reason)
+        if state == CONFLICT:
+            cop.action, cop.status, cop.reason = BLOCKED, "skipped", f"manual action required: {reason}"
+        out.append(cop)
         if op.action == CREATE:
-            op.action, op.status, op.reason = BLOCKED, "skipped", "credential state unknown"
+            op.action, op.status, op.reason = BLOCKED, "skipped", f"credential {cred.name!r}: {reason}"
         return out
     if state == ABSENT:  # D-023: Secret fehlt → anlegen und am bestehenden User durchsetzen
-        out.append(Op(target.name, "Credential", cred.name, CREATE_SECRET))
+        out.append(Op(target.name, "Credential", cred.name, CREATE_SECRET, reason=state.reason))
         reset = op.observed is not None
     elif op.observed is None or password_policy == "set-on-create":
         reset = False
@@ -297,7 +315,7 @@ def _password_ops(target: Target, op: Op, model: Model, policy: OperatorPolicy) 
         reset = True
     else:
         try:
-            equal = target.adapter.verify_password(target.spec, op.observed, cred.provider.read(cred.spec))
+            equal = target.adapter.verify_password(session, target.spec, op.observed, cred.provider.read(cred.spec))
         except (AdapterError, CredentialError) as e:
             log.warning("%s %s: password check failed (%s)", op.kind, op.id, type(e).__name__)
             equal = None
@@ -312,7 +330,8 @@ def _password_ops(target: Target, op: Op, model: Model, policy: OperatorPolicy) 
     return out
 
 
-def reconcile(target: Target, found: dict[str, Discovery], model: Model, policy: OperatorPolicy) -> list[Op]:
+def reconcile(target: Target, found: dict[str, Discovery], model: Model, policy: OperatorPolicy,
+              session=None) -> list[Op]:
     """Reconciliation-Matrix §6.1; Ergebnis deterministisch sortiert (Ausführungsreihenfolge)."""
     rp = target.policy or {}
     scope, exclusions = rp.get("scope", {}), rp.get("exclusions", {})
@@ -326,18 +345,21 @@ def reconcile(target: Target, found: dict[str, Discovery], model: Model, policy:
         for id, want in declared.items():
             have = observed.get(id)
             op = Op(target.name, kind, id, NOOP, desired=want, observed=have)
-            if have is None:
-                op.action, op.reason = (CREATE, "") if complete else (UNKNOWN, f"discovery {discovery.status}")
-            else:
+            if have is not None:
                 op.changes = {f: (have.attrs.get(f), v) for f, v in sorted(want.attrs.items())
                               if have.attrs.get(f) != v}
-                if op.changes and have.manageable and not have.system:
-                    op.action = UPDATE
-                elif op.changes:
-                    op.action, op.status, op.reason = BLOCKED, "skipped", "not manageable by adapter"
+            if blocked := target.adapter.check(session, want):
+                op.action, op.status, op.reason = BLOCKED, "skipped", blocked
+            elif have is None:
+                op.action, op.reason = (CREATE, "") if complete else (UNKNOWN, f"discovery {discovery.status}")
+            elif have.system or not have.manageable:  # auch ohne Abweichung: nie als NOOP "verwaltet" melden
+                op.action, op.status = BLOCKED, "skipped"
+                op.reason = "protected system object" if have.system else "not manageable by adapter"
+            elif op.changes:
+                op.action = UPDATE
             ops.append(op)
             if want.password_ref and op.action in (CREATE, UPDATE, NOOP):
-                ops += _password_ops(target, op, model, policy)
+                ops += _password_ops(target, session, op, model, policy)
         for id, have in observed.items():
             if id in declared:
                 continue
@@ -367,11 +389,48 @@ def reconcile(target: Target, found: dict[str, Discovery], model: Model, policy:
         return (1, rank[op.kind], op.id, op.action == SET_PASSWORD, op.action)
 
     unique = {(o.kind, o.id, o.action): o for o in reversed(ops)}  # ein CREATE_SECRET je Credential
-    result = sorted(unique.values(), key=order)
+    result = _dependency_order(target.adapter, sorted(unique.values(), key=order))
     for op in result:
         if op.action in MUTATING and op.status is None:
             op.status = "planned"
     return result
+
+
+def _dependency_order(adapter: Adapter, ops: list[Op]) -> list[Op]:
+    """Stabile topologische Sortierung: Abhängigkeiten gehen vor, sonst bleibt die Reihenfolge von ``ops``.
+
+    Anlegen/Ändern folgt ``Adapter.dependencies``, Löschen läuft umgekehrt. Ops in einem Zyklus (und
+    alles, was davon abhängt) werden BLOCKED.
+    """
+    targets = defaultdict(list)  # (kind, id, ist DELETE) -> Indizes der Ops, von denen andere abhängen können
+    for i, o in enumerate(ops):
+        if o.action in (CREATE, UPDATE, DELETE):
+            targets[(o.kind, o.id, o.action == DELETE)].append(i)
+    after = defaultdict(set)  # i -> Ops, die erst nach i laufen dürfen
+    for i, o in enumerate(ops):
+        if o.action in (CREATE, UPDATE, SET_PASSWORD, DELETE):
+            for kind, id in adapter.dependencies(o.desired or o.observed):
+                for j in targets[(kind, id, o.action == DELETE)]:
+                    if j != i and o.action == DELETE:  # abhängige Ressource zuerst löschen
+                        after[i].add(j)
+                    elif j != i:
+                        after[j].add(i)
+    pending = Counter(j for js in after.values() for j in js)
+    ready = [i for i in range(len(ops)) if not pending[i]]
+    heapq.heapify(ready)
+    done = []
+    while ready:
+        i = heapq.heappop(ready)
+        done.append(i)
+        for j in after[i]:
+            pending[j] -= 1
+            if not pending[j]:
+                heapq.heappush(ready, j)
+    stuck = [i for i in range(len(ops)) if pending[i] > 0]
+    names = ", ".join(f"{ops[i].kind}/{ops[i].id}" for i in stuck)
+    for i in stuck:
+        ops[i].action, ops[i].status, ops[i].reason = BLOCKED, "skipped", f"dependency cycle among {names}"
+    return [ops[i] for i in done + stuck]
 
 
 # --- Ausführung ---------------------------------------------------------------------------------
@@ -387,7 +446,7 @@ def _verify(target: Target, session, op: Op) -> bool:
         return False
     if op.password is not None:
         try:
-            if target.adapter.verify_password(target.spec, have, op.password) is False:
+            if target.adapter.verify_password(session, target.spec, have, op.password) is False:
                 return False
         except AdapterError:
             pass  # nicht prüfbar ist kein Gegenbeweis
@@ -436,6 +495,8 @@ def _execute(target: Target, session, ops: list[Op], model: Model, known: list[S
 
 def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy) -> tuple[dict, list[Op]]:
     info = {"targetId": target.name, "adapter": target.adapter.id, "inventory": {}, "status": "error"}
+    if target.adapter.insecure_transport(target.spec):
+        info["insecureTransport"] = True
     ops: list[Op] = []
     known: list[Secret] = []
     try:
@@ -450,7 +511,7 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy)
             found = {kind: _discover(target, session, kind) for kind in target.adapter.kinds}
             info["inventory"] = {k: {"status": d.status, "count": len(d.resources), **({"reason": d.reason}
                                  if d.reason else {})} for k, d in found.items()}
-            ops = reconcile(target, found, model, policy)
+            ops = reconcile(target, found, model, policy, session)
             if write:
                 _execute(target, session, ops, model, known)
     except (AdapterError, CredentialError) as e:
@@ -488,6 +549,11 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
             if mode == "apply":
                 raise PolicyError(f"target {name!r}: authoritative mode not permitted by operator policy")
             log.warning("target %s: authoritative mode not permitted by operator policy", name)
+        if model.targets[name].adapter.insecure_transport(model.targets[name].spec):
+            if policy.requireTls:
+                raise PolicyError(f"target {name!r}: insecure transport (no TLS or no certificate verification) "
+                                  "not permitted by operator policy requireTls")
+            log.warning("target %s: insecure transport (no TLS or no certificate verification)", name)
     targets, ops = [], []
     for name in names:
         info, target_ops = _run_target(mode, model.targets[name], model, policy)

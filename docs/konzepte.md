@@ -30,9 +30,9 @@ Deshalb sieht Ordivus auch Objekte, die jemand von Hand oder mit einem anderen W
 | deklariert, abweichend | `UPDATE` (nur die deklarierten Felder) |
 | nicht deklariert, Modus `additive` (Standard) | `UNMANAGED` – nur gemeldet |
 | nicht deklariert, Modus `authoritative` im Scope | `UNDESIRABLE` – gelöscht wird erst, wenn die Operator Policy Löschen erlaubt |
-| ausgeschlossen oder Systemobjekt | `IGNORE` – nur gezählt |
+| ausgeschlossen oder Systemobjekt | `IGNORE` – nur gezählt; deklariertes Systemobjekt → `BLOCKED` |
 | Zielsystem nicht vollständig lesbar | `UNKNOWN` – nie Löschen, nie Anlegen |
-| vom Adapter nicht veränderbar (z. B. ClickHouse-Benutzer aus `users.xml`) | `UNMANAGED`, Kennzeichen `manageable: false`; deklariert → `BLOCKED` |
+| vom Adapter nicht veränderbar (z. B. ClickHouse-Benutzer aus `users.xml`) | `UNMANAGED`, Kennzeichen `manageable: false`; deklariert → `BLOCKED` (auch ohne Abweichung) |
 
 Ein nicht gesetztes Feld heißt **nicht** „zurücksetzen“: Verglichen werden nur Felder, die Sie deklariert haben.
 

@@ -97,7 +97,7 @@ class FakeAdapter(Adapter):
         elif op.action == SET_PASSWORD:
             objects[op.id]["password"] = password
 
-    def verify_password(self, target, resource, password: Secret):
+    def verify_password(self, session, target, resource, password: Secret):
         if (target["instance"], resource.id) in self.unverifiable:
             return None
         obj = self.store.get(target["instance"], {}).get(resource.kind, {}).get(resource.id)

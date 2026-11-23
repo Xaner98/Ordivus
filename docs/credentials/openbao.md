@@ -52,7 +52,7 @@ Der Login erfolgt erst beim ersten Zugriff; das Token lebt nur im Speicher des L
 nicht erneuert (Läufe sind kurz; TTL der Rolle entsprechend wählen). Tokens stehen nur im Header
 `X-Vault-Token`, nie in URLs, Logs oder Fehlermeldungen.
 
-## Zustände: present / absent / unknown
+## Zustände: present / absent / unknown / conflict
 
 | Beobachtung | Zustand |
 |---|---|
@@ -60,14 +60,15 @@ nicht erneuert (Läufe sind kurz; TTL der Rolle entsprechend wählen). Tokens st
 | Metadata 404 **und** `sys/capabilities-self` bestätigt `read` auf `<mount>/metadata/<path>` **und** `<mount>/data/<path>` | `absent` |
 | Metadata 404 ohne bestätigtes Leserecht auf beiden Pfaden | `unknown` |
 | 403, 401, 5xx, Timeout, Netzwerk-/TLS-Fehler | `unknown` |
-| Metadata 200, aktuelle Version gelöscht (`deletion_time`) oder zerstört | `unknown` + Warnung „manual action required“ |
+| Metadata 200, aktuelle Version gelöscht (`deletion_time`) oder zerstört | `conflict` |
 
 Ein Rechtefehler ergibt nie `absent`. Bei `unknown` blockiert die Engine das Anlegen des
 Benutzers und fasst weder Secret noch Passwort an.
 
 **Gelöschte aktuelle Version:** Der Wert ist weg, `cas=0` würde scheitern, ein Neuanlegen mit
-höherer Version wäre ein stilles Überschreiben der Historie. Ordivus meldet deshalb `unknown`
-(Credential-Op `UNKNOWN`) und schreibt eine Warnung ins Log. Auflösung manuell: Version
+höherer Version wäre ein stilles Überschreiben der Historie. Ordivus meldet deshalb die
+Credential-Op als `BLOCKED` („manual action required“, `apply` endet mit Exit-Code 11) und
+schreibt eine Warnung ins Log. Auflösung manuell: Version
 wiederherstellen (`undelete`) oder Metadaten bewusst löschen (`DELETE <mount>/metadata/<path>`),
 danach erkennt der nächste Lauf `absent`.
 
@@ -103,4 +104,4 @@ sonst bleibt jedes fehlende Secret `unknown`.
 - Nur KV v2, nur Feld `password`, keine Multi-Field-Dokumente.
 - Keine Token-Erneuerung, kein Lease-Handling.
 - Kein Retry; Netzwerkfehler sind `unknown` bzw. Abbruch des Ziels.
-- Der Grund für `unknown` steht nur im Log, nicht im Report (Engine-Vertrag kennt keinen Grund).
+- Der Grund für `unknown`/`conflict` steht als `reason` an der Credential-Op im Report.

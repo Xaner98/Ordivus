@@ -6,11 +6,14 @@ owns everything else: config loading, diffing, policies, ordering, credentials, 
 Lifecycle per run and target:
 
 1. ``validate(doc)`` for the Target doc and each resource doc bound to the target (config time).
-2. ``desired(doc)`` for each resource doc: normalize into a ``Resource``.
-3. ``connect(target, secret, write)``; in apply additionally ``lock(session)``.
+2. ``desired(doc)`` for each resource doc: normalize into a ``Resource``; then
+   ``validate_target(target, resources)`` once with all desired resources of the target.
+3. ``insecure_transport(target)`` before connecting; then ``connect(target, secret, write)``;
+   in apply additionally ``lock(session)``.
 4. ``discover(session, kind, scope)`` once per kind in ``kinds``.
-5. apply only: ``apply(session, op)`` per operation, followed by ``discover`` again to verify.
-6. ``verify_password`` where a resource carries ``spec.credentials`` with policy ``verify``.
+5. Planning: ``check(session, resource)`` per desired resource, ``dependencies(resource)`` for
+   ordering, ``verify_password`` where a resource carries ``spec.credentials`` with policy ``verify``.
+6. apply only: ``apply(session, op)`` per operation, followed by ``discover`` again to verify.
 
 Rules every adapter must keep:
 
@@ -86,8 +89,9 @@ class Resource:
     out of ``desired`` means "not managed", never "reset". Never put passwords into attrs.
 
     Observed resources set ``manageable=False`` when the adapter cannot change them (e.g. a user
-    from a config file) and ``system=True`` for native protected objects; both are never deleted
-    and ``system`` objects that are not declared are reported as ``IGNORE``.
+    from a config file) and ``system=True`` for native protected objects; both are never changed
+    or deleted (a declared one is ``BLOCKED``) and ``system`` objects that are not declared are
+    reported as ``IGNORE``.
     ``password_ref`` is set by the engine (name of the Credential doc); adapters leave it None.
     """
 
@@ -140,9 +144,8 @@ class Adapter:
     """Base class for adapters. Subclasses set ``id`` and ``kinds`` and implement the methods."""
 
     id: ClassVar[str]
-    # shortcut: kind order instead of a full dependency DAG, upgrade when kinds need cross-ordering.
-    # Creates/updates run in this order, deletes in reverse (e.g. Database, DatabaseRole,
-    # DatabaseUser, Grant).
+    # Primary execution order: creates/updates run in this order, deletes in reverse (e.g. Database,
+    # DatabaseRole, DatabaseUser, Grant). ``dependencies`` refines it per resource.
     kinds: ClassVar[tuple[str, ...]]
     # Kinds that accept ``spec.credentials`` (a managed password), e.g. ("DatabaseUser",).
     password_kinds: ClassVar[tuple[str, ...]] = ()
@@ -160,6 +163,26 @@ class Adapter:
     def desired(self, doc: dict) -> Resource:
         """Normalize a validated resource doc (same stripped form as ``validate``)."""
         raise NotImplementedError
+
+    def validate_target(self, target: dict, resources: list[Resource]) -> list[str]:
+        """Cross-document check of all desired ``resources`` of one target (``target`` = Target
+        spec); return error messages (config error). Default: none."""
+        return []
+
+    def insecure_transport(self, target: dict) -> bool:
+        """True if the connection to ``target`` is plaintext or skips certificate verification.
+        The engine refuses such targets under operator policy ``requireTls``. Default False."""
+        return False
+
+    def check(self, session, resource: Resource) -> str | None:
+        """Planning hook for a desired resource: a reason string makes its op ``BLOCKED`` (never
+        executed), e.g. a protected name that does not exist yet. Default None (allowed)."""
+        return None
+
+    def dependencies(self, resource: Resource) -> list[tuple[str, str]]:
+        """``(kind, id)`` pairs that must be created/updated before ``resource`` (deleted after it).
+        Called for desired and observed resources, also within one kind. Default none."""
+        return []
 
     @contextmanager
     def connect(self, target: dict, secret: Secret | None, write: bool):
@@ -185,8 +208,8 @@ class Adapter:
         """
         raise NotImplementedError
 
-    def verify_password(self, target: dict, resource: Resource, password: Secret) -> bool | None:
-        """Check ``password`` against the observed ``resource`` by a login attempt.
+    def verify_password(self, session, target: dict, resource: Resource, password: Secret) -> bool | None:
+        """Check ``password`` against the observed ``resource`` (login attempt or via ``session``).
 
         True: password matches. False: target positively reports a wrong password.
         None: cannot tell (login not possible for another reason, not supported). Default None.

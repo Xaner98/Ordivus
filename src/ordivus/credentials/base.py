@@ -9,12 +9,23 @@ import string
 
 from ordivus.adapters.base import Secret
 
-PRESENT, ABSENT, UNKNOWN = "present", "absent", "unknown"
+PRESENT, ABSENT, UNKNOWN, CONFLICT = "present", "absent", "unknown", "conflict"
 ALPHABETS = {
     "alphanumeric": string.ascii_letters + string.digits,
     "alphanumeric-symbol-safe": string.ascii_letters + string.digits + "-_.~",
 }
 MIN_LENGTH = 16
+
+
+class State(str):
+    """Zustand mit Begründung; vergleicht wie der Status-String (``State(UNKNOWN, "x") == UNKNOWN``)."""
+
+    reason: str
+
+    def __new__(cls, status: str, reason: str = ""):
+        state = super().__new__(cls, status)
+        state.reason = reason
+        return state
 
 
 class CredentialError(Exception):
@@ -34,7 +45,11 @@ class CredentialProvider:
         return []
 
     def state(self, ref: dict) -> str:
-        """``present``/``absent``/``unknown``; ``absent`` nur bei positivem Beweis."""
+        """``present``/``absent``/``unknown``/``conflict``; ``absent`` nur bei positivem Beweis.
+
+        ``conflict``: Zustand bekannt, aber nur manuell lösbar (z. B. gelöschte aktuelle Version).
+        Ein ``State`` statt des reinen Strings trägt die Begründung in den Report.
+        """
         raise NotImplementedError
 
     def read(self, ref: dict) -> Secret:

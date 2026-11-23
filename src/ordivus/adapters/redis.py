@@ -114,7 +114,6 @@ def _rules(attrs: dict) -> list[str]:
 class RedisSession:
     client: object
     write: bool
-    endpoint: tuple
     protected: frozenset
     persist: str
 
@@ -142,11 +141,6 @@ class RedisAdapter(Adapter):
     id = "redis"
     kinds = (KIND,)
     password_kinds = (KIND,)
-
-    def __init__(self):
-        # Passwort-Hashes aus der letzten Discovery: (host, port, user) → (nopass, {sha256-hex}).
-        # Liegen bewusst nicht in attrs, damit sie nie in Reports landen.
-        self._hashes: dict[tuple, tuple[bool, frozenset]] = {}
 
     def validate(self, doc):
         spec, errors = doc.get("spec") or {}, []
@@ -221,7 +215,7 @@ class RedisAdapter(Adapter):
                     raise PermanentError("persist aclSave requires 'aclfile' to be configured on the server")
                 if persist == "configRewrite" and not client.info("server").get("config_file"):
                     raise PermanentError("persist configRewrite requires the server to run with a config file")
-            yield RedisSession(client, write, (host, port), frozenset({"default", username}), persist)
+            yield RedisSession(client, write, frozenset({"default", username}), persist)
         except redis.exceptions.RedisError as e:
             raise _error(e, secret) from None
         finally:
@@ -236,7 +230,6 @@ class RedisAdapter(Adapter):
                 info = session.client.execute_command("ACL", "GETUSER", name)
                 if info is None:  # zwischen USERS und GETUSER gelöscht
                     continue
-                self._hashes[(*session.endpoint, name)] = ("nopass" in info["flags"], frozenset(info["passwords"]))
                 attrs = {
                     "enabled": "on" in info["flags"],
                     "keys": _keys(info["keys"].split()),
@@ -277,14 +270,21 @@ class RedisAdapter(Adapter):
         except redis.exceptions.RedisError as e:
             raise _error(e, op.password) from None
 
-    def verify_password(self, target, resource, password: Secret):
-        # Vergleich gegen die SHA-256-Hashes aus ACL GETUSER, ohne Login-Versuch.
-        # shortcut: no AUTH fallback when no hashes were discovered (returns None), add one if a
+    def verify_password(self, session, target, resource, password: Secret):
+        # Vergleich gegen die SHA-256-Hashes aus ACL GETUSER, ohne Login-Versuch; Hashes nie in attrs.
+        # shortcut: no AUTH fallback when ACL GETUSER fails (engine reports unverifiable), add one if a
         # target hides ACL GETUSER output.
-        entry = self._hashes.get((*_endpoint(target), resource.id))
-        if entry is None:
+        import redis
+
+        try:
+            info = session.client.execute_command("ACL", "GETUSER", resource.id)
+        except redis.exceptions.RedisError as e:
+            raise _error(e) from None
+        if info is None:
             return None
-        nopass, hashes = entry
-        if nopass:
+        if "nopass" in info["flags"]:
             return False  # jedes Passwort würde akzeptiert: gilt als nicht durchgesetzt
-        return hashlib.sha256(password.reveal().encode()).hexdigest() in hashes
+        return hashlib.sha256(password.reveal().encode()).hexdigest() in info["passwords"]
+
+    def insecure_transport(self, target):
+        return target["endpoint"].get("tls") is None

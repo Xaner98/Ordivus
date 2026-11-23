@@ -1,6 +1,6 @@
 # Konfiguration
 
-Eine Ordivus-Konfiguration ist eine Datei oder ein Verzeichnis mit YAML- bzw. JSON-Dateien (`*.yaml`, `*.yml`, `*.json`, rekursiv). Jede Datei darf mehrere Dokumente enthalten, getrennt durch `---`. Jedes Dokument hat dieselbe äußere Form:
+Eine Ordivus-Konfiguration ist eine Datei oder ein Verzeichnis mit YAML- bzw. JSON-Dateien (`*.yaml`, `*.yml`, `*.json`, rekursiv). Dateien und Verzeichnisse, deren Name mit `.` beginnt, werden übersprungen (z. B. `..data` in ConfigMap-Mounts). Jede Datei darf mehrere Dokumente enthalten, getrennt durch `---`. Jedes Dokument hat dieselbe äußere Form:
 
 ```yaml
 apiVersion: ordivus.dev/v1alpha1
@@ -11,7 +11,7 @@ spec:
   ...
 ```
 
-Unbekannte Felder sind Fehler, nicht stille Ignorierung. Fehlermeldungen nennen Datei und Zeile.
+Unbekannte Felder sind Fehler, nicht stille Ignorierung. Fehlermeldungen nennen Datei und Zeile. Adapter prüfen außerdem dokumentübergreifend je Target (z. B. derselbe Name als `DatabaseRole` und `DatabaseUser`); solche Fehler nennen die Stelle des Target-Dokuments.
 
 Prüfen ohne Verbindung zu einem Zielsystem:
 
@@ -135,7 +135,10 @@ allowAuthoritative: false
 allowDelete: false
 allowPasswordReset: true
 profile: standard            # standard | development
+requireTls: false            # true: Targets ohne TLS bzw. ohne Zertifikatsprüfung verweigern
 ```
+
+`requireTls`: Was als unsicher gilt, legt der Adapter fest (Klartext, TLS aus, keine Zertifikatsprüfung; bei PostgreSQL alles außer `verify-ca`/`verify-full`). Mit `true` bricht der Lauf vor der ersten Verbindung mit Exit-Code 11 ab; mit `false` gibt es eine Warnung auf stderr und `"insecureTransport": true` am Target im Report.
 
 Ohne `--policy` gelten genau diese Werte. Eine angegebene, aber fehlende oder fehlerhafte Policy-Datei bricht den Lauf ab (Exit-Code 11).
 
@@ -147,7 +150,7 @@ Ohne `--policy` gelten genau diese Werte. Eine angegebene, aber fehlende oder fe
 | 1 | Interner Fehler (Bug, bitte melden) |
 | 2 | Ungültiger Aufruf (Argumente) |
 | 10 | Drift-/Änderungsschwelle überschritten (`--fail-on`) |
-| 11 | Policy-Verstoß oder nicht erlaubte Operation |
+| 11 | Policy-Verstoß oder nicht erlaubte Operation; bei `apply` auch jede `BLOCKED`-Operation (die übrigen laufen trotzdem) |
 | 12 | Konfigurationsfehler |
 | 13 | Zielsystem, Credential oder Netzwerk nicht verfügbar |
 | 14 | Teilweise ausgeführt oder nach `apply` nicht bestätigt – bitte prüfen |
@@ -162,5 +165,7 @@ Schwellen: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable
 ```sh
 ordivus drift -f ./config --format json | grep '"type": *"report"' > report.json
 ```
+
+Operationen an nicht veränderbaren oder geschützten Objekten tragen `"manageable": false` bzw. `"system": true`. Passwörter erscheinen nur als `CREATE_SECRET` und `SET_PASSWORD` (Wert immer `<redacted>`), nie unter den Änderungen eines `CREATE`. Kann ein Credential Provider den Zustand eines Secrets nicht bestimmen, steht der Grund als `reason` an der Credential-Operation (`UNKNOWN`, bzw. `BLOCKED`, wenn nur ein manueller Eingriff hilft).
 
 Mit `--output DATEI` landet der Report in einer Datei. Ordivus speichert Reports nicht selbst; das Aufzeichnen übernimmt das aufrufende System (CI-Artefakt, Log-Sammlung).

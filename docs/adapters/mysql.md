@@ -37,6 +37,9 @@ spec:
 | `verify-ca` | Zertifikat gegen `caFile` geprüft, Hostname nicht |
 | `verify-full` | Zertifikat und Hostname geprüft (Default, empfohlen) |
 
+`disable` und `require` gelten als unsichere Verbindung: Warnung und `insecureTransport: true` im Report, mit
+Operator Policy `requireTls: true` Abbruch vor dem Verbinden (Exit-Code 11).
+
 ## Discovery und Scope
 
 - `spec.scope` begrenzt die Inventarisierung. Die Globs (`fnmatch`, Groß-/Kleinschreibung beachtet) gelten für den
@@ -115,8 +118,9 @@ E-Mail-Adressen als Benutzernamen (`me@example.com@%`).
 In MySQL sind Rollen ebenfalls Konten in `mysql.user`. Ordivus behandelt ein Konto als **Rolle**, wenn es gesperrt
 ist (`account_locked = 'Y'`), das Passwort als abgelaufen gilt (`password_expired = 'Y'`) und
 `authentication_string` leer ist. Genau so legt `CREATE ROLE` ein Konto an. Alle anderen Konten sind Benutzer. Wenn
-du ein Konto gleichzeitig als `DatabaseRole` und als `DatabaseUser` deklarierst, scheitert das zweite `CREATE` mit
-einer Meldung (MySQL-Fehler 1396). Die Konfigurationsprüfung erkennt das noch nicht.
+du ein Konto (`name@host`) gleichzeitig als `DatabaseRole` und als `DatabaseUser` deklarierst, ist das ein
+Konfigurationsfehler (Exit-Code 12), schon bei `config validate`. Ist ein `DatabaseUser` in `roles` eines anderen
+Benutzers eingetragen, legt Ordivus ihn zuerst an.
 
 ## Kind `Grant`
 
@@ -143,8 +147,10 @@ Ressourcen-ID: ``shop_reader@% ON `shop`.*``. Bei `global` heißt das Objekt `*.
   erscheinen. Liste die Privilegien explizit auf.
 - Globale Grants enthalten auch dynamische Privilegien (`mysql.global_grants`, z. B. `BACKUP_ADMIN`).
 - Tabellen-Grants setzen voraus, dass die Tabelle existiert.
-- Datenbanknamen in Grants gelten in MySQL als Muster: `_` und `%` sind Wildcards. Ordivus übernimmt den Namen
-  unverändert.
+- Datenbanknamen in Grants auf Datenbankebene sind in MySQL Muster (`_` und `%` sind Wildcards). Ordivus escapt
+  sie (`app\_db`), ein Grant auf `app_db` gilt also nur für `app_db`, nicht für `appXdb`. Beim Lesen werden die
+  Escapes entfernt. Vorhandene, nicht escapte Wildcard-Grants erscheinen als eigenes Objekt mit der Endung
+  `(wildcard pattern)` und `manageable: false`; sie werden nie geändert oder gelöscht.
 
 ## Geschützte Systemobjekte
 
