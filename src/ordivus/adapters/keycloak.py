@@ -224,6 +224,12 @@ class KeycloakAdapter(Adapter):
             return Resource(kind, name, attrs)
         return Resource(kind, f"{spec['realm']}/{spec.get('clientId' if kind == CLIENT else 'name', name)}", attrs)
 
+    def export(self, resource):
+        if resource.kind == REALM:
+            return dict(resource.attrs)
+        realm, name = split(resource.id)
+        return {"realm": realm, "clientId" if resource.kind == CLIENT else "name": name, **resource.attrs}
+
     def validate_target(self, target, resources):
         errors, login = [], target.get("login") or {}
         login_realm = login.get("realm", MASTER)

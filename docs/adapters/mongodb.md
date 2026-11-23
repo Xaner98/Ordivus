@@ -218,3 +218,4 @@ target systems. Avoid concurrent `apply` runs against the same target by organiz
 - `passwordPolicy: verify` needs a direct network path to the server as the user.
 - No `mongodb+srv`, no multiple seed hosts, no login of Ordivus via x509/LDAP/Kerberos.
 - TLS and replica set mode are not covered by the integration tests (single node without TLS).
+- Users exported with `ordivus export` have no `spec.credentials`; add them before `plan` (see [export](../export.md#credentials-and-passwords)).

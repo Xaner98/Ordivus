@@ -10,6 +10,8 @@ ordivus drift -f ./config    # Does reality deviate? Are there foreign objects?
 ordivus apply -f ./config    # Execute and verify permitted changes
 ```
 
+Existing systems can be onboarded with `ordivus export`, which writes their current state as configuration ([docs/export.md](docs/export.md)).
+
 You describe the desired state in YAML. On every run, Ordivus reads the actual state directly from the target system, shows every difference and changes only what is permitted. There is no state file, no database of its own and no permanently running controller.
 
 > **Status:** Alpha (`0.1.0`). Interfaces and the configuration format may change before `1.0`.
@@ -113,6 +115,7 @@ ordivus apply -f config    # nothing left to do
 - [Concepts](docs/concepts.md) – stateless, additive/authoritative, unknown stays unknown, passwords
 - [Configuration](docs/configuration.md) – file structure, engine kinds, operator policy, exit codes, report format
 - [Quickstart](docs/quickstart.md)
+- [Export](docs/export.md) – onboard existing systems: live state as configuration
 - [Kubernetes and CI/CD](docs/kubernetes.md) – Helm chart, job templates, GitLab, Jenkins, Argo CD, Flux
 - Adapters: [PostgreSQL](docs/adapters/postgresql.md) · [MySQL](docs/adapters/mysql.md) · [ClickHouse](docs/adapters/clickhouse.md) · [ArcadeDB](docs/adapters/arcadedb.md) · [Redis](docs/adapters/redis.md) · [OpenBao](docs/adapters/openbao.md) · [MariaDB](docs/adapters/mariadb.md) · [MongoDB](docs/adapters/mongodb.md) · [RabbitMQ](docs/adapters/rabbitmq.md) · [Keycloak](docs/adapters/keycloak.md) · [Kafka](docs/adapters/kafka.md) · [Grafana](docs/adapters/grafana.md)
 - Secret sources: [OpenBao KV v2](docs/credentials/openbao.md)

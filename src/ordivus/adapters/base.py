@@ -181,6 +181,12 @@ class Adapter:
         """Normalize a validated resource doc (same stripped form as ``validate``)."""
         raise NotImplementedError
 
+    def export(self, resource: Resource) -> dict:
+        """Spec fields (without ``targetRef``/``credentials``) of a resource doc that ``desired`` turns
+        back into ``resource`` (same ``id``, same values for every attr it sets); used by
+        ``ordivus export``. ``metadata.name`` is ``resource.id``. Default: the discovered attrs."""
+        return dict(resource.attrs)
+
     def validate_target(self, target: dict, resources: list[Resource]) -> list[str]:
         """Cross-document check of all desired ``resources`` of one target (``target`` = Target
         spec); return error messages (config error). Default: none."""

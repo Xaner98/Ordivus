@@ -18,6 +18,7 @@ That is why Ordivus also sees objects someone created by hand or with another to
 | `ordivus plan` | What would `apply` do right now? | no |
 | `ordivus drift` | Does the actual state deviate from the desired state? Are there foreign objects? | no |
 | `ordivus apply` | Execute permitted changes and verify them afterwards (one re-read per resource kind after all operations) | yes |
+| `ordivus export` | Write the current state of existing objects as configuration ([export](export.md)) | no |
 
 `plan` and `drift` change neither target systems nor secret stores – not even a password generated "just briefly". For real safety, also run these commands with an identity that has read-only access to the target system.
 

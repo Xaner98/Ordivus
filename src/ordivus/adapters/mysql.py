@@ -351,6 +351,12 @@ class MySQLAdapter(Adapter):
             attrs["accountLocked"] = spec["accountLocked"]
         return Resource(kind, rid, attrs)
 
+    def export(self, resource):
+        if resource.kind not in ("DatabaseRole", "DatabaseUser"):
+            return dict(resource.attrs)
+        name, host = self._ref(resource.id)
+        return {"identity": {"username": name, **({"host": host} if host else {})}, **resource.attrs}
+
     def validate_target(self, target, resources):
         roles = {r.id for r in resources if r.kind == "DatabaseRole"}  # Rolle und User sind dasselbe Konto
         return [f"account {r.id!r} is declared as both DatabaseRole and DatabaseUser"

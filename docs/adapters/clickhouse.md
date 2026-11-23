@@ -197,3 +197,4 @@ GRANT CURRENT GRANTS ON *.* TO ordivus WITH GRANT OPTION;
 - No lock during `apply` (ClickHouse has no advisory locks); avoid parallel `apply` runs against the same target.
 - Not modeled: settings profiles, quotas, row policies, role-to-role grants, `GRANT OPTION`, column grants, source objects of `READ`/`WRITE`, authentication other than `sha256_password` (LDAP, Kerberos, certificates).
 - `Database.engine` without parameters; an engine change is never executed.
+- `ordivus export` skips users with `HOST REGEXP`/`HOST LIKE` restrictions (not expressible in `DatabaseUser`).

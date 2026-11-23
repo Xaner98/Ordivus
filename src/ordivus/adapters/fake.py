@@ -69,6 +69,9 @@ class FakeAdapter(Adapter):
     def desired(self, doc):
         return Resource(doc["kind"], doc["metadata"]["name"], dict((doc.get("spec") or {}).get("attrs", {})))
 
+    def export(self, resource):
+        return {"attrs": dict(resource.attrs)}
+
     @contextmanager
     def connect(self, target, secret, write):
         if target["instance"] in self.connect_error:

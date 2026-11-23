@@ -334,3 +334,15 @@ def test_privileged_policies_need_operator_policy(tmp_path, uid):
     assert all(bao("GET", f"sys/policies/acl/{names[k]}")[0] == 404 for k in (*PRIVILEGED_POLICIES, "rules"))
     for k in HARMLESS_POLICIES:
         bao("DELETE", f"sys/policies/acl/{names[k]}")
+
+
+def test_export_roundtrip(tmp_path, uid):
+    from roundtrip import assert_export_roundtrip
+
+    app = f"it-export-{uid}"
+    hcl = '# app\npath "secret/data/x/*" {\n  capabilities = ["read", "list"]\n}\n\npath "sys/health" {\n' \
+          '  capabilities = ["sudo"]\n}  \n'
+    assert bao("PUT", f"sys/policies/acl/{app}", {"policy": hcl})[0] == 204
+    docs = assert_export_roundtrip(policy_config(tmp_path, ROOT), {("OpenBaoPolicy", app)}, tmp_path,
+                                   allowPrivilegedGrants=True)
+    assert all(d["metadata"]["name"] not in ("root", "default") for d in docs)

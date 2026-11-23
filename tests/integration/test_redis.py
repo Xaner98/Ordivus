@@ -294,3 +294,12 @@ def test_getuser_parsed_identically_for_resp2_and_resp3():
 def test_server_version_reported(cfg):
     rep = run(cfg(user("it_a")), "plan")
     assert rep["targets"][0]["serverVersion"].startswith(("Redis ", "Valkey "))
+
+
+def test_export_roundtrip(cfg, client, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    run(cfg(*(user(f"it_x{i}", **spec) for i, spec in enumerate(ROUND_TRIPS))), "apply")
+    client.execute_command("ACL", "SETUSER", "it_grown", "on", "~app:*", "&news", "+@read", "-keys")
+    assert_export_roundtrip(cfg(), {("DatabaseUser", f"it_x{i}") for i in range(len(ROUND_TRIPS))}
+                            | {("DatabaseUser", "it_grown")}, tmp_path, allowPrivilegedGrants=True)

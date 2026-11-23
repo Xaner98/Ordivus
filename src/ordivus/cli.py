@@ -12,7 +12,7 @@ from collections import Counter
 from enum import IntEnum
 from importlib.metadata import version
 
-from ordivus.core import config, engine, policy, report
+from ordivus.core import config, engine, export, policy, report
 
 
 class ExitCode(IntEnum):
@@ -78,6 +78,36 @@ def _run(args) -> ExitCode:
     return code
 
 
+def _export(args) -> ExitCode:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger = logging.getLogger("ordivus")
+    logger.addHandler(handler)
+    try:
+        docs = config.load(args.file)
+        operator = policy.load(args.policy) if args.policy else policy.OperatorPolicy()
+        result = export.run(docs, operator, args.target, args.kind)
+    except config.ConfigError as e:
+        for line in e.errors:
+            logger.error("%s", line)
+        return ExitCode.CONFIG
+    except policy.PolicyError as e:
+        logger.error("policy: %s", e)
+        return ExitCode.POLICY
+    finally:
+        logger.removeHandler(handler)
+    text = export.dump(result.documents) if result.documents else ""
+    print(f"exported {len(result.documents)} documents" + (" (incomplete, see warnings)" if result.incomplete else ""),
+          file=sys.stderr)
+    code = ExitCode.TARGET if result.incomplete else ExitCode.OK
+    if not args.output:
+        sys.stdout.write(text)
+    elif error := _write_private(args.output, text):
+        print(f"cannot write export to {args.output}: {error}", file=sys.stderr)
+        return code or ExitCode.INTERNAL
+    return code
+
+
 def _write_private(path: str, text: str) -> str | None:
     """Report mit 0600 schreiben; kein Symlink, und eine vorhandene Datei nur, wenn sie eine reguläre Datei
     des aktuellen Nutzers ist (der Report kann Rechte- und Inventardetails enthalten). Fehlertext oder None."""
@@ -118,6 +148,13 @@ def _parser() -> argparse.ArgumentParser:
         elif name == "plan":
             sub.add_argument("--fail-on", choices=["changes"])
         sub.set_defaults(handler=_run, fail_on=None)
+    exp = commands.add_parser("export", help="write the live state of targets as configuration")
+    exp.add_argument("-f", "--file", required=True, help="config file or directory with Targets and Credentials")
+    exp.add_argument("--policy", help="operator security policy file (YAML or JSON)")
+    exp.add_argument("-o", "--output", help="write the configuration to FILE instead of stdout")
+    exp.add_argument("--target", action="append", help="only this target (repeatable)")
+    exp.add_argument("--kind", action="append", help="only this resource kind (repeatable)")
+    exp.set_defaults(handler=_export)
     return parser
 
 

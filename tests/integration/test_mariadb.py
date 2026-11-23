@@ -457,3 +457,18 @@ def test_grant_to_missing_role_never_hits_user_account(my):
     assert not sql("SELECT 1 FROM mysql.db WHERE User=%s", f"{p}same")
     with pytest.raises(PermanentError, match=r"MariaDB 10.5.9 is not supported \(minimum 10.6.0\)"):
         adapter._check_version("10.5.9-MariaDB")
+
+
+def test_export_roundtrip(my, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    p = my.prefix
+    assert report.exit_code(run(full_config(my), "apply", allowPrivilegedGrants=True)) == 0
+    sql("CREATE USER %s@'10.0.0.%%' ACCOUNT LOCK", f"{p}grown")  # nicht von Ordivus angelegt
+    sql(f"CREATE TABLE {quote_ident(p + 'app')}.t (id int)")
+    sql(f"GRANT SELECT ON {quote_ident(p + 'app')}.{quote_ident('t')} TO %s@'10.0.0.%%'", f"{p}grown")
+    scope = {k: {"include": [p + "*"]} for k in ("users", "roles", "databases")}
+    docs = assert_export_roundtrip(my(scope=scope), {("Database", f"{p}app"), ("DatabaseUser", f"{p}app@%"),
+                                                     ("DatabaseUser", f"{p}grown@10.0.0.%")}, tmp_path,
+                                   allowPrivilegedGrants=True)
+    assert len([d for d in docs if d["kind"] == "Grant"]) == 3

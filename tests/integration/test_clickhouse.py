@@ -497,3 +497,17 @@ def test_set_password_refuses_multiple_auth_methods(cfg):
     op = mutating(run(path, "apply"))[0]
     assert (op["action"], op["status"]) == ("SET_PASSWORD", "failed")
     assert can_login("oit_pw", "old-a-123") is True and can_login("oit_pw", "old-b-123") is True
+
+
+def test_export_roundtrip(cfg, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    assert mutating(run(cfg(*BASIC), "apply"))
+    root("CREATE USER oit_grown IDENTIFIED WITH no_password HOST NAME 'app.example.org', IP '192.168.1.1'")
+    root("GRANT oit_role TO oit_grown")
+    root("CREATE TABLE oit_db.t (id UInt8) ENGINE = Memory")
+    root("GRANT SELECT ON oit_db.t TO oit_grown")
+    assert_export_roundtrip(cfg(scope={"databases": {"include": ["oit_*"]}}), {
+        ("Database", "oit_db"), ("DatabaseRole", "oit_role"), ("DatabaseUser", "oit_user"),
+        ("DatabaseUser", "oit_grown"), ("Grant", grant_id("oit_role", "oit_db", None)),
+        ("Grant", grant_id("oit_grown", "oit_db", "t"))}, tmp_path)

@@ -533,3 +533,18 @@ def test_server_version_and_minimum(my):
         _product_version("MySQL", "8.0.15", (8, 0, 16))
     with pytest.raises(PermanentError, match="use adapter 'mariadb'"):
         MySQLAdapter()._check_version("11.4.13-MariaDB-ubu2404")
+
+
+def test_export_roundtrip(my, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    p = my.prefix
+    assert report.exit_code(run(full_config(my), "apply", allowPrivilegedGrants=True)) == 0
+    sql("CREATE USER %s@'10.0.0.%%' ACCOUNT LOCK", f"{p}grown")  # nicht von Ordivus angelegt
+    sql(f"CREATE TABLE {quote_ident(p + 'app')}.t (id int)")
+    sql(f"GRANT SELECT ON {quote_ident(p + 'app')}.{quote_ident('t')} TO %s@'10.0.0.%%'", f"{p}grown")
+    scope = {k: {"include": [p + "*"]} for k in ("users", "roles", "databases")}
+    docs = assert_export_roundtrip(my(scope=scope), {("Database", f"{p}app"), ("DatabaseUser", f"{p}app@%"),
+                                                     ("DatabaseUser", f"{p}grown@10.0.0.%")}, tmp_path,
+                                   allowPrivilegedGrants=True)
+    assert len([d for d in docs if d["kind"] == "Grant"]) == 3

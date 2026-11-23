@@ -206,6 +206,9 @@ class OpenBaoAdapter(Adapter):
         text = spec["policy"] if "policy" in spec else render(spec["rules"])
         return Resource(KIND, spec["policyName"], {"policy": canonical(text)})
 
+    def export(self, resource):
+        return {"policyName": resource.id, "policy": resource.attrs["policy"]}
+
     def insecure_transport(self, target):
         return target["endpoint"]["url"].startswith("http://")
 

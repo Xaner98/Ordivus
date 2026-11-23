@@ -276,6 +276,11 @@ class MongoDBAdapter(Adapter):
             attrs["privileges"] = _privileges(spec["privileges"])
         return Resource(doc["kind"], f"{db}.{spec.get('name', doc['metadata']['name'])}", attrs)
 
+    def export(self, resource):
+        db, name = _split(resource.id)
+        keys = ("roles", "privileges") if resource.kind == "DatabaseRole" else ("roles",)  # mechanisms: nur Info
+        return {"database": db, "name": name, **{k: resource.attrs[k] for k in keys}}
+
     def validate_target(self, target, resources):
         # SCRAM-Benutzer ohne Passwort lässt MongoDB nicht zu
         return [f"DatabaseUser {r.id!r} needs spec.credentials (MongoDB users require a password)"

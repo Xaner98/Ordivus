@@ -623,18 +623,8 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy,
     return info, ops
 
 
-def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
-        only: list[str] | None = None) -> dict:
-    """Führt plan/drift/apply aus und liefert das Report-Modell (§15.1).
-
-    Wirft ConfigError (Exit 12) und PolicyError (Exit 11) vor jeder Verbindung zu einem Target.
-    """
-    if mode not in MODES:
-        raise ValueError(f"mode must be one of {MODES}")
-    policy = policy or OperatorPolicy()
-    started = datetime.now(UTC)
-    digest = config.digest(docs)  # vor jeder Verbindung: nicht serialisierbare Configs scheitern ohne Mutation
-    model = prepare(docs)
+def preflight(mode: str, model: Model, policy: OperatorPolicy, only: list[str] | None) -> list[str]:
+    """Gewählte Targets (sortiert); ConfigError/PolicyError vor der ersten Verbindung (§11.6)."""
     names = sorted(model.targets)
     if only:
         missing = sorted(set(only) - set(names))
@@ -648,7 +638,8 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
     for name in names:
         if not policy.allows_target(name):
             raise PolicyError(f"target {name!r} not allowed by operator policy")
-        if (model.targets[name].policy or {}).get("mode") == "authoritative" and not policy.allowAuthoritative:
+        if (model.targets[name].policy or {}).get("mode") == "authoritative" and not policy.allowAuthoritative \
+                and mode != "export":
             if mode == "apply":
                 raise PolicyError(f"target {name!r}: authoritative mode not permitted by operator policy")
             log.warning("target %s: authoritative mode not permitted by operator policy", name)
@@ -657,6 +648,22 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
                 raise PolicyError(f"target {name!r}: insecure transport (no TLS or no certificate verification) "
                                   "not permitted by operator policy requireTls")
             log.warning("target %s: insecure transport (no TLS or no certificate verification)", name)
+    return names
+
+
+def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
+        only: list[str] | None = None) -> dict:
+    """Führt plan/drift/apply aus und liefert das Report-Modell (§15.1).
+
+    Wirft ConfigError (Exit 12) und PolicyError (Exit 11) vor jeder Verbindung zu einem Target.
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    policy = policy or OperatorPolicy()
+    started = datetime.now(UTC)
+    digest = config.digest(docs)  # vor jeder Verbindung: nicht serialisierbare Configs scheitern ohne Mutation
+    model = prepare(docs)
+    names = preflight(mode, model, policy, only)
     targets, ops, scrub = [], [], _ScrubFilter(model.known)
     log.addFilter(scrub)
     opened = {}  # apply: alle sperrbaren Targets vorab verbinden und sperren, bevor irgendwo geschrieben wird

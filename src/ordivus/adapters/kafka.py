@@ -306,6 +306,10 @@ class KafkaAdapter(Adapter):
             return Resource(ACL, _acl_key(attrs), attrs)
         return Resource(USER, spec.get("name", doc["metadata"]["name"]), {})
 
+    def export(self, resource):
+        # SCRAM-Mechanismen/Iterationen sind Passwortdetails, kein Spec-Feld
+        return dict(resource.attrs) if resource.kind == ACL else {}
+
     def insecure_transport(self, target):
         return target.get("securityProtocol", "SASL_SSL") != "SASL_SSL"
 

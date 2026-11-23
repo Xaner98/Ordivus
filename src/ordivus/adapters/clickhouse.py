@@ -267,6 +267,12 @@ class ClickHouseAdapter(Adapter):
             "grantee": grantee, "database": db, "table": table,
             "privileges": sorted({privilege(p) for p in spec["privileges"]})})
 
+    def export(self, resource):
+        # Grant ohne database/table hat dort None; leere REGEXP-/LIKE-Hosts entfallen (nicht deklarierbar:
+        # gesetzte bleiben stehen und lassen die Validierung scheitern, der User wird dann nicht exportiert)
+        return {k: v for k, v in resource.attrs.items()
+                if v is not None and not (k in ("hostNamesRegexp", "hostNamesLike") and v == [])}
+
     def insecure_transport(self, target):
         return target["endpoint"].get("tls") is None  # ohne tls: http://
 

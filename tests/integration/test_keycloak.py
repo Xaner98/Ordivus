@@ -288,3 +288,20 @@ def test_service_account_login(realm, admin, cfg):
         engine.prepare(config.load(cfg(doc("KeycloakGroup", "g", realm="other", name="team"), target=target)))
     with pytest.raises(AuthorizationError, match="login"), adapter.connect(target, Secret("wrong"), write=False):
         pass
+
+
+def test_export_roundtrip(realm, admin, cfg, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    run(cfg(doc("KeycloakRealm", realm, enabled=True, displayName="IT Realm"),
+            doc("KeycloakRealmRole", f"{realm}-reader", realm=realm, name="reader", description="reads"),
+            doc("KeycloakGroup", f"{realm}-staff", realm=realm, name="staff", realmRoles=["reader"]),
+            *app(realm, redirectUris=["https://app.example.org/*"])), "apply")
+    admin("POST", f"/admin/realms/{realm}/roles", {"name": "grown", "composite": False})
+    admin("POST", f"/admin/realms/{realm}/clients", {"clientId": "spa", "publicClient": True,
+                                                       "webOrigins": ["+"], "redirectUris": ["/x"]})
+    target = {**TARGET, "scope": {"realms": {"include": [realm]}}}
+    assert_export_roundtrip(cfg(target=target), {
+        ("KeycloakRealm", realm), ("KeycloakRealmRole", f"{realm}/reader"), ("KeycloakRealmRole", f"{realm}/grown"),
+        ("KeycloakGroup", f"{realm}/staff"), ("KeycloakClient", f"{realm}/app"), ("KeycloakClient", f"{realm}/spa")},
+        tmp_path)

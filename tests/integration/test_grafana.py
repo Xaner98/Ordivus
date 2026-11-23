@@ -232,3 +232,19 @@ def test_scope_partial_and_authoritative_delete(p, cfg):
     tok, adapter = token(f"{p}nobody", "None"), GrafanaAdapter()
     with adapter.connect({"endpoint": TARGET["endpoint"]}, Secret(tok), write=False) as session:
         assert adapter.discover(session, "GrafanaFolder", None).status == PARTIAL
+
+
+def test_export_roundtrip(p, cfg, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    alice = user(f"{p}alice")
+    team, uid, sa = f"{p}ops", f"{p}fold", f"{p}deployer"
+    run(cfg(doc("GrafanaTeam", team, targetRef="gf", email="ops@example.invalid", members=[alice]),
+            doc("GrafanaFolder", uid, targetRef="gf", title=f"{p} Ops",
+                permissions=[{"team": team, "permission": "Edit"}, {"role": "Viewer", "permission": "View"}]),
+            doc("GrafanaServiceAccount", sa, targetRef="gf", role="Editor")), "apply")
+    api("POST", "/api/folders", {"uid": f"{p}grown", "title": "no"})  # Grafana-Standardrechte bleiben stehen
+    scope = {k: {"include": [p + "*"]} for k in ("teams", "folders", "serviceAccounts")}
+    assert_export_roundtrip(cfg(target={**TARGET, "scope": scope}), {
+        ("GrafanaTeam", team), ("GrafanaFolder", uid), ("GrafanaFolder", f"{p}grown"),
+        ("GrafanaServiceAccount", sa)}, tmp_path, allowPrivilegedGrants=True)

@@ -515,3 +515,22 @@ def test_maintain_is_blocked_before_postgresql_17():
     assert adapter.check(pg16, grant, allow_privileged=True) \
         == "MAINTAIN requires PostgreSQL 17 or later (server is PostgreSQL 16.4)"
     assert adapter.check(Session(None, {"endpoint": {}}, None, False, 170002), grant, allow_privileged=True) is None
+
+
+def test_export_roundtrip(pg, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    p = pg.p
+    pg.sql("CREATE ROLE {} NOLOGIN", p + "readers")
+    pg.sql("CREATE ROLE {} LOGIN CONNECTION LIMIT 5 CREATEDB IN ROLE {}", p + "app", p + "readers")
+    pg.sql("CREATE DATABASE {} OWNER {} ENCODING 'UTF8' TEMPLATE template0", p + "db", p + "app")
+    pg.sql("GRANT CONNECT, TEMPORARY ON DATABASE {} TO {}", p + "db", p + "readers")
+    pg.sql("CREATE SCHEMA s AUTHORIZATION {}", p + "app", dbname=p + "db")
+    pg.sql("CREATE TABLE s.t (id int)", dbname=p + "db")
+    pg.sql("GRANT USAGE ON SCHEMA s TO {}", p + "readers", dbname=p + "db")
+    pg.sql("GRANT SELECT ON ALL TABLES IN SCHEMA s TO {}", p + "readers", dbname=p + "db")
+    assert_export_roundtrip(pg.cfg(), {
+        ("DatabaseRole", p + "readers"), ("DatabaseUser", p + "app"), ("Database", p + "db"),
+        ("Grant", grant_id(p + "readers", p + "db", "database")),
+        ("Grant", grant_id(p + "readers", p + "db", "schema", "s")),
+        ("Grant", grant_id(p + "readers", p + "db", "tables-in-schema", "s"))}, tmp_path)

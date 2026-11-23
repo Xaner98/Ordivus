@@ -237,3 +237,16 @@ def test_non_admin_login_is_partial_or_forbidden(p):
         assert adapter.discover(session, VHOST, None).status == "partial"
         with pytest.raises(AuthorizationError):  # Engine meldet das Kind als forbidden
             adapter.discover(session, USER, None)
+
+
+def test_export_roundtrip(p, cfg, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    vhost, name = f"{p}team/a", f"{p}app"
+    run(cfg(doc(VHOST, vhost, targetRef="mq"), *user(name, "pw", tags=["management"], permissions={vhost: PERM})),
+        "apply")
+    admin("PUT", _path("users", f"{p}grown"), {"password": secrets.token_hex(8), "tags": "management,policymaker"})
+    admin("PUT", _path("permissions", vhost, f"{p}grown"), {"configure": "", "write": "", "read": "^q\\.yes$"})
+    scope = {"vhosts": {"include": [p + "*"]}, "users": {"include": [p + "*"]}}
+    assert_export_roundtrip(cfg(scope=scope), {(VHOST, vhost), (USER, name), (USER, f"{p}grown")}, tmp_path,
+                            allowPrivilegedGrants=True)

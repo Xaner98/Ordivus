@@ -341,3 +341,18 @@ def test_documented_read_only_identity_is_complete(cfg, mongo):
     inventory = rep["targets"][0]["inventory"]
     assert inventory["DatabaseUser"]["status"] == inventory["DatabaseRole"]["status"] == "complete", inventory
     assert ("DatabaseRole", "it_other.it_r", "UNMANAGED") in actions(rep)
+
+
+def test_export_roundtrip(cfg, mongo, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    (cfg.secrets / "u_pw").write_text("app-pw-1")
+    run(cfg(role("it_reader", privileges=READER, roles=["read"]),
+            user("it_app_user", roles=["it_reader", {"role": "read", "db": OTHER}], credentials=creds())), "apply")
+    mongo[OTHER].command("createUser", "it_grown", pwd="app-pw-1", roles=[{"role": "readWrite", "db": OTHER}])
+
+    def with_credentials(d):  # MongoDB-Benutzer brauchen spec.credentials (siehe docs/export.md)
+        return {**d, "spec": {**d["spec"], "credentials": creds()}} if d["kind"] == "DatabaseUser" else d
+
+    assert_export_roundtrip(cfg(), {("DatabaseRole", f"{APP}.it_reader"), ("DatabaseUser", f"{APP}.it_app_user"),
+                                    ("DatabaseUser", f"{OTHER}.it_grown")}, tmp_path, with_credentials)

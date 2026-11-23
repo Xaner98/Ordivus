@@ -70,12 +70,12 @@ def cfg(tmp_path):
     secrets_dir.mkdir()
     (secrets_dir / "admin").write_text(ROOT_PW)
 
-    def write(*extra):
+    def write(*extra, **target):
         directory = tmp_path / "config"
         directory.mkdir(exist_ok=True)
         for f in directory.iterdir():
             f.unlink()
-        docs = [doc("Target", "adb", adapter="arcadedb", **TARGET, authentication={"credentialRef": "admin"}),
+        docs = [doc("Target", "adb", adapter="arcadedb", **TARGET, **target, authentication={"credentialRef": "admin"}),
                 doc("CredentialProvider", "files", type="file", directory=str(secrets_dir)),
                 doc("Credential", "admin", providerRef="files", path="admin"), *extra]
         for i, d in enumerate(docs):
@@ -260,3 +260,15 @@ def test_server_version(p):
     assert arcadedb._version({"version": "26.2.1 (build x)"})[1] < arcadedb.MIN_VERSION
     with pytest.raises(PermanentError, match="version"):
         arcadedb._version({"version": "unknown"})
+
+
+def test_export_roundtrip(p, cfg, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    db, name = f"{p}graph", f"{p}writer"
+    run(cfg(doc("Database", db, targetRef="adb"), *user(name, "pw", databases={db: ["crud", "readonly"]})), "apply")
+    root("POST", "/api/v1/server/users", {"name": f"{p}grown", "password": secrets.token_hex(8),
+                                          "databases": {db: ["readonly"]}})
+    scope = {"databases": {"include": [p + "*"]}, "users": {"include": [p + "*"]}}
+    assert_export_roundtrip(cfg(scope=scope), {("Database", db), ("DatabaseUser", name), ("DatabaseUser", f"{p}grown")},
+                            tmp_path)

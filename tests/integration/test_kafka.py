@@ -339,3 +339,15 @@ def test_secrets_never_in_report(cfg, client):
     path = cfg(user("it-pw", credentials={"credentialRef": "pw", "passwordPolicy": "verify"}))
     text = json.dumps([run(path, m) for m in ("plan", "apply", "drift")])
     assert CANARY not in text and ADMIN_PW not in text
+
+
+def test_export_roundtrip(cfg, client, tmp_path):
+    from roundtrip import assert_export_roundtrip
+
+    add_user(client, "it-grown")
+    add_acl(client, "User:it-grown", "TOPIC", "orders.", "WRITE", pattern="PREFIXED")
+    add_acl(client, "User:it-grown", "TOPIC", "orders.", "DESCRIBE", pattern="PREFIXED")
+    add_acl(client, "User:it-grown", "GROUP", "g1", "READ", permission="DENY")
+    assert_export_roundtrip(cfg(), {
+        ("KafkaUser", "it-grown"), ("KafkaAcl", acl_id("User:it-grown", "TOPIC", "orders.", "PREFIXED")),
+        ("KafkaAcl", acl_id("User:it-grown", "GROUP", "g1", permission="DENY"))}, tmp_path)
