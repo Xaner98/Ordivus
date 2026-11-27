@@ -144,9 +144,9 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_argument("--output", help="write the report to FILE instead of stdout")
         sub.add_argument("--target", action="append", help="only this target (repeatable)")
         if name == "drift":
-            sub.add_argument("--fail-on", choices=["actionable", "unmanaged", "unknown", "any"])
+            sub.add_argument("--fail-on", choices=["actionable", "unmanaged", "unknown", "violations", "any"])
         elif name == "plan":
-            sub.add_argument("--fail-on", choices=["changes"])
+            sub.add_argument("--fail-on", choices=["changes", "violations"])
         sub.set_defaults(handler=_run, fail_on=None)
     exp = commands.add_parser("export", help="write the live state of targets as configuration")
     exp.add_argument("-f", "--file", required=True, help="config file or directory with Targets and Credentials")

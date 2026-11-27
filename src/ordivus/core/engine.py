@@ -36,7 +36,7 @@ from ordivus.adapters.base import (
     Resource,
     Secret,
 )
-from ordivus.core import config, report
+from ordivus.core import config, report, rules
 from ordivus.core.config import ConfigError, Document
 from ordivus.core.policy import OperatorPolicy, PolicyError
 from ordivus.credentials import PROVIDERS
@@ -76,6 +76,7 @@ class Target:
     desired: list[Resource] = field(default_factory=list)
     password_policy: dict[tuple[str, str], str] = field(default_factory=dict)
     policy: dict | None = None  # spec der ReconciliationPolicy
+    rules: list[dict] = field(default_factory=list)  # Einträge aus Rules-Dokumenten (auch enabled: false)
 
 
 @dataclass
@@ -227,6 +228,32 @@ def prepare(docs: list[Document]) -> Model:
                 errors.append(f"{where(doc)}: more than one ReconciliationPolicy for target {target.name!r}")
             errors += _check_policy(spec(doc), target, where(doc))
             target.policy = spec(doc)
+
+    for doc in by_kind["Rules"]:
+        s, ref = spec(doc), spec(doc).get("targetRef")
+        errors += _unknown(s, {"targetRef", "rules"}, where(doc))
+        if ref is not None and _ref(ref) not in targets:
+            errors.append(f"{where(doc)}: unknown targetRef {ref!r}")
+            continue
+        if not isinstance(s.get("rules"), list) or not s["rules"]:
+            errors.append(f"{where(doc)}: spec.rules must be a non-empty list")
+            continue
+        for i, entry in enumerate(s["rules"]):
+            if problems := rules.check_entry(entry, f"{where(doc)}: spec.rules[{i}]"):
+                errors += problems
+                continue
+            adapter = rules.RULES[entry["id"]].adapter
+            if ref is not None and targets[ref].adapter is not None and targets[ref].adapter.id != adapter:
+                errors.append(f"{where(doc)}: spec.rules[{i}]: rule {entry['id']!r} applies to adapter "
+                              f"{adapter!r}, target {ref!r} uses {targets[ref].adapter.id!r}")
+                continue
+            for target in [targets[ref]] if ref is not None else \
+                    [t for t in targets.values() if t.adapter is not None and t.adapter.id == adapter]:
+                if any(e["id"] == entry["id"] for e in target.rules):
+                    errors.append(f"{where(doc)}: spec.rules[{i}]: rule {entry['id']!r} configured more than "
+                                  f"once for target {target.name!r}")
+                else:
+                    target.rules.append(entry)
 
     for doc in by_kind["resource"]:
         s, target = spec(doc), targets.get(_ref(spec(doc).get("targetRef")))
@@ -588,12 +615,16 @@ def _open(target: Target, model: Model, write: bool) -> tuple[ExitStack, object,
         return stack, None, e, stage == "lock"
 
 
-def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy, opened=None) -> tuple[dict, list[Op]]:
-    """``opened``: Ergebnis von ``_open`` aus der Lock-Vorphase, sonst wird hier verbunden."""
+def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy,
+                opened=None) -> tuple[dict, list[Op], tuple[list, list]]:
+    """``opened``: Ergebnis von ``_open`` aus der Lock-Vorphase, sonst wird hier verbunden.
+
+    Regeln werden gegen die Discovery vor allen Änderungen ausgewertet (auch in apply)."""
     info = {"targetId": target.name, "adapter": target.adapter.id, "inventory": {}, "status": "error"}
     if target.adapter.insecure_transport(target.spec):
         info["insecureTransport"] = True
     ops: list[Op] = []
+    checked = None
     write = mode == "apply"
     try:
         stack, session, error, _ = opened or _open(target, model, write)
@@ -605,6 +636,7 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy,
             found = {kind: _discover(target, session, kind) for kind in target.adapter.kinds}
             info["inventory"] = {k: {"status": d.status, "count": len(d.resources), **({"reason": d.reason}
                                  if d.reason else {})} for k, d in found.items()}
+            checked = rules.evaluate(target.name, target.rules, found)
             ops = reconcile(target, found, model, policy, session)
             if write:
                 _execute(target, session, ops, model)
@@ -617,10 +649,10 @@ def _run_target(mode: str, target: Target, model: Model, policy: OperatorPolicy,
         for o in ops:
             if write and o.status == "planned":
                 o.status, o.reason = "skipped", "target aborted"
-        return info, ops
+        return info, ops, checked or rules.evaluate(target.name, target.rules, None, "target error")
     info["status"] = report.target_status(mode, info["inventory"], ops,
                                           (target.policy or {}).get("mode") == "authoritative")
-    return info, ops
+    return info, ops, checked
 
 
 def preflight(mode: str, model: Model, policy: OperatorPolicy, only: list[str] | None) -> list[str]:
@@ -664,7 +696,7 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
     digest = config.digest(docs)  # vor jeder Verbindung: nicht serialisierbare Configs scheitern ohne Mutation
     model = prepare(docs)
     names = preflight(mode, model, policy, only)
-    targets, ops, scrub = [], [], _ScrubFilter(model.known)
+    targets, ops, results, violations, scrub = [], [], [], [], _ScrubFilter(model.known)
     log.addFilter(scrub)
     opened = {}  # apply: alle sperrbaren Targets vorab verbinden und sperren, bevor irgendwo geschrieben wird
     try:
@@ -677,13 +709,18 @@ def run(mode: str, docs: list[Document], policy: OperatorPolicy | None = None,
                 targets.append({"targetId": name, "adapter": model.targets[name].adapter.id, "inventory": {},
                                 "status": "skipped", "reason": "not run: lock on target(s) "
                                 f"{', '.join(map(repr, held))} is held by another apply"})
-                continue
-            info, target_ops = _run_target(mode, model.targets[name], model, policy, opened.pop(name, None))
-            targets.append(info)
-            ops += target_ops
+                checked = rules.evaluate(name, model.targets[name].rules, None, "target skipped")
+            else:
+                info, target_ops, checked = _run_target(mode, model.targets[name], model, policy,
+                                                        opened.pop(name, None))
+                targets.append(info)
+                ops += target_ops
+            results += checked[0]
+            violations += checked[1]
     finally:
         for stack, *_ in opened.values():  # übersprungene Targets: Sperre und Verbindung sofort freigeben
             with suppress(Exception):
                 stack.close()
         log.removeFilter(scrub)
-    return _scrub_all(report.build(mode, started, datetime.now(UTC), digest, targets, ops), model.known)
+    return _scrub_all(report.build(mode, started, datetime.now(UTC), digest, targets, ops, results, violations),
+                      model.known)

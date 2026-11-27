@@ -304,6 +304,10 @@ class PostgreSQLAdapter(Adapter):
         # verify-ca prüft den Hostnamen nicht: jedes Zertifikat derselben CA wäre akzeptiert
         return target["endpoint"].get("tls", {}).get("mode", "prefer") != "verify-full"
 
+    def export(self, resource):
+        # superuser ist nur beobachtet (Regeln), nie verwaltbar; Superuser selbst sind manageable=False
+        return {k: v for k, v in resource.attrs.items() if k != "superuser"}
+
     def check(self, session, resource, allow_privileged=False):
         policy = "requires operator policy allowPrivilegedGrants"
         if resource.kind == "Grant":
@@ -371,7 +375,7 @@ class PostgreSQLAdapter(Adapter):
             if kind in ROLE_KINDS:
                 return Discovery(COMPLETE, [
                     Resource(kind, n, {"memberOf": list(member_of), "connectionLimit": limit, "createdb": createdb,
-                                       "createrole": createrole},
+                                       "createrole": createrole, "superuser": superuser},
                              manageable=not (superuser or me),
                              system=oid == BOOTSTRAP_OID or n.startswith("pg_") or admin_chain)
                     for oid, n, login, superuser, limit, createdb, createrole, member_of, me, admin_chain

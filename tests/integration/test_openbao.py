@@ -346,3 +346,27 @@ def test_export_roundtrip(tmp_path, uid):
     docs = assert_export_roundtrip(policy_config(tmp_path, ROOT), {("OpenBaoPolicy", app)}, tmp_path,
                                    allowPrivilegedGrants=True)
     assert all(d["metadata"]["name"] not in ("root", "default") for d in docs)
+
+
+def test_rules_detect_sudo_and_wildcard_write_on_live_policies(tmp_path, uid):
+    names = {k: f"it-rule-{k}-{uid}" for k in ("sudo", "wild", "ok", "accepted")}
+    hcl = {"sudo": 'path "sys/health" { capabilities = ["sudo"] }',
+           "wild": 'path "+/*" { capabilities = ["read", "update"] }',
+           "ok": 'path "secret/data/x/*" { capabilities = ["read", "update"] }',
+           "accepted": 'path "*" { capabilities = ["sudo", "update"] }'}
+    for k, name in names.items():
+        assert bao("PUT", f"sys/policies/acl/{name}", {"policy": hcl[k]})[0] == 204
+    try:
+        directory = policy_config(tmp_path, ROOT, doc("Rules", "compliance", targetRef="bao", rules=[
+            {"id": "openbao.sudo-capability", "allow": [names["accepted"]]},
+            {"id": "openbao.wildcard-write", "allow": [names["accepted"]]}]))
+        rep = engine.run("drift", config.load(directory), OperatorPolicy())  # undeclared policies, read-only
+        found = {(v["rule"], v["id"]) for v in rep["violations"] if v["id"].startswith("it-rule-")}
+        assert found == {("openbao.sudo-capability", names["sudo"]), ("openbao.wildcard-write", names["wild"])}
+        # default und root sind lesbar und nicht auffällig: beide Regeln vollständig ausgewertet
+        assert [r["status"] for r in rep["rules"]] == ["complete", "complete"], rep["rules"]
+        assert not {"default", "root"} & {v["id"] for v in rep["violations"]}
+        assert report.exit_code(rep) == 0 and report.exit_code(rep, "violations") == 10
+    finally:
+        for name in names.values():
+            bao("DELETE", f"sys/policies/acl/{name}")

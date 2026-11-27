@@ -19,7 +19,7 @@ from ordivus.adapters.base import (
     Op,
 )
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"  # 1.1: rules, violations, summary.violations
 ACTIONS = (NOOP, CREATE_SECRET, CREATE, UPDATE, SET_PASSWORD, DELETE, UNMANAGED, UNDESIRABLE, IGNORE,
            UNKNOWN, BLOCKED)
 ACTIONABLE = (CREATE_SECRET, CREATE, UPDATE, SET_PASSWORD, DELETE)
@@ -60,7 +60,8 @@ def target_status(mode: str, inventory: dict, ops: list[Op], authoritative: bool
     return "in_sync"
 
 
-def build(mode, started, finished, digest: str, targets: list[dict], ops: list[Op]) -> dict:
+def build(mode, started, finished, digest: str, targets: list[dict], ops: list[Op], rules: list[dict] = (),
+          violations: list[dict] = ()) -> dict:
     counts = Counter(o.action for o in ops)
     statuses = Counter(o.status for o in ops)
     return {
@@ -79,9 +80,12 @@ def build(mode, started, finished, digest: str, targets: list[dict], ops: list[O
             "failed": statuses["failed"],
             "unverified": statuses["unverified"],
             "targetErrors": sum(t["status"] == "error" for t in targets),
+            "violations": len(violations),
         },
         "targets": targets,
         "operations": [_op(o) for o in ops if o.action != IGNORE],  # Exclusions nur gezählt (§5.2)
+        "rules": list(rules),
+        "violations": list(violations),
         "secretsIncluded": False,
     }
 
@@ -99,13 +103,16 @@ def exit_code(report: dict, fail_on: str | None = None) -> int:
     if apply and any(o["status"] == "denied" or o["action"] == BLOCKED for o in ops):
         return 11
     actions = summary["actions"]
+    # nicht vollständig ausgewertete Regel: Compliance nicht belegt, zählt wie ein Verstoß
+    violated = summary["violations"] > 0 or any(r["status"] != "complete" for r in report["rules"])
     exceeded = {
         None: False,
         "changes": summary["actionableDrift"] > 0,
         "actionable": summary["actionableDrift"] > 0,
         "unmanaged": summary["actionableDrift"] + actions[UNMANAGED] + actions[UNDESIRABLE] > 0,
         "unknown": actions[UNKNOWN] > 0 or "incomplete" in statuses,
-        "any": any(o["action"] != NOOP for o in ops) or "incomplete" in statuses,
+        "any": any(o["action"] != NOOP for o in ops) or "incomplete" in statuses or violated,
+        "violations": violated,
     }[fail_on]
     return 10 if exceeded else 0
 
@@ -135,8 +142,14 @@ def render_human(report: dict) -> str:
             lines.append(f"  {o['action']:<14} {o['kind']}/{o['id']}{status}"
                          + (f"  ({o['reason']})" if o.get("reason") else ""))
             lines += [f"      {f}: {_value(c['old'])} -> {_value(c['new'])}" for f, c in o["changes"].items()]
+        for r in report["rules"]:
+            if r["target"] == t["targetId"] and r["status"] != "complete":
+                lines.append(f"  RULE {r['rule']} not fully evaluated: {r['reason']}")
+        lines += [f"  VIOLATION [{v['severity']}] {v['rule']} {v['kind']}/{v['id']}: {v['message']}"
+                  for v in report["violations"] if v["target"] == t["targetId"]]
     s = report["summary"]
     counts = " ".join(f"{a}={n}" for a, n in s["actions"].items() if n)
     lines.append(f"\nsummary: {counts or 'nothing'}; actionable={s['actionableDrift']} "
-                 f"failed={s['failed']} unverified={s['unverified']} targetErrors={s['targetErrors']}")
+                 f"failed={s['failed']} unverified={s['unverified']} targetErrors={s['targetErrors']}"
+                 + (f" violations={s['violations']}" if report["rules"] else ""))
     return "\n".join(lines)

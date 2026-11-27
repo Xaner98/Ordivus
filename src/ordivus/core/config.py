@@ -13,7 +13,7 @@ import yaml
 from ordivus import adapters
 
 API_VERSION = "ordivus.dev/v1alpha1"
-ENGINE_KINDS = frozenset({"Target", "CredentialProvider", "Credential", "ReconciliationPolicy"})
+ENGINE_KINDS = frozenset({"Target", "CredentialProvider", "Credential", "ReconciliationPolicy", "Rules"})
 TOP_LEVEL_FIELDS = frozenset({"apiVersion", "kind", "metadata", "spec"})
 SUFFIXES = (".yaml", ".yml", ".json")
 MAX_FILE_BYTES = 1024 * 1024

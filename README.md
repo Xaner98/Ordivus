@@ -116,6 +116,7 @@ ordivus apply -f config    # nothing left to do
 - [Configuration](docs/configuration.md) – file structure, engine kinds, operator policy, exit codes, report format
 - [Quickstart](docs/quickstart.md)
 - [Export](docs/export.md) – onboard existing systems: live state as configuration
+- [Rules](docs/rules.md) – built-in compliance checks against the live state (e.g. superuser logins, sudo policies)
 - [Kubernetes and CI/CD](docs/kubernetes.md) – Helm chart, job templates, GitLab, Jenkins, Argo CD, Flux
 - Adapters: [PostgreSQL](docs/adapters/postgresql.md) · [MySQL](docs/adapters/mysql.md) · [ClickHouse](docs/adapters/clickhouse.md) · [ArcadeDB](docs/adapters/arcadedb.md) · [Redis](docs/adapters/redis.md) · [OpenBao](docs/adapters/openbao.md) · [MariaDB](docs/adapters/mariadb.md) · [MongoDB](docs/adapters/mongodb.md) · [RabbitMQ](docs/adapters/rabbitmq.md) · [Keycloak](docs/adapters/keycloak.md) · [Kafka](docs/adapters/kafka.md) · [Grafana](docs/adapters/grafana.md)
 - Secret sources: [OpenBao KV v2](docs/credentials/openbao.md)

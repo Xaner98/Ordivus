@@ -126,6 +126,23 @@ spec:
 - Undeclared objects **outside** the scope stay `UNMANAGED`, inside it they become `UNDESIRABLE`.
 - `authoritative` takes effect only if the operator policy permits it; deletion happens only with `allowDelete: true`.
 
+### Rules – compliance checks against the live state
+
+```yaml
+kind: Rules
+metadata:
+  name: access-compliance
+spec:
+  targetRef: analytics-postgres   # optional; without it: every target of the rule's adapter
+  rules:
+    - id: postgresql.superuser-login
+      allow: [postgres]           # accepted names, exact match
+    - id: postgresql.createrole-login
+      enabled: false              # optional, default true
+```
+
+Built-in rules evaluated against **everything discovered** on a target, declared or not, in `plan`, `drift` and `apply`. Rules are off unless configured. Results go into `rules` and `violations` in the report; they do not change the exit code unless `--fail-on violations` is set. See [Rules](rules.md) for the rule list and evaluation semantics.
+
 ## Operator policy
 
 The operator policy is **not** a resource of the configuration but a separate file that is managed separately and passed with `--policy` – typically from another repository or a protected volume.
@@ -160,7 +177,7 @@ Without `--policy`, exactly these values apply. A policy file that is specified 
 | 14 | Partially executed or not confirmed after `apply` – please check (also: target aborted after first changes, or an operation skipped with status `conflict`; target status `partial`) |
 | 130 / 143 | Aborted (SIGINT / SIGTERM) |
 
-Thresholds: `ordivus plan --fail-on changes`, `ordivus drift --fail-on actionable|unmanaged|unknown|any`. `unknown` triggers as soon as something could not be determined (`UNKNOWN` operations or target status `incomplete`); `any` includes it. Without `--fail-on`, `plan` and `drift` exit with 0 even if differences were found.
+Thresholds: `ordivus plan --fail-on changes|violations`, `ordivus drift --fail-on actionable|unmanaged|unknown|violations|any`. `unknown` triggers as soon as something could not be determined (`UNKNOWN` operations or target status `incomplete`); `any` includes it. `violations` triggers on any rule violation and on any configured rule that could not be fully evaluated ([Rules](rules.md)); `any` includes it as well. Without `--fail-on`, `plan` and `drift` exit with 0 even if differences were found.
 
 Target status in the report: `in_sync`, `drift_detected`, `incomplete` (inventory incomplete, or a declared resource or its password not verifiable), and for `apply` also `applied`, `partial`, `error` and `skipped` (not run because a target's lock was held by a concurrent `apply`). An `apply` never reports `in_sync` as long as a declared resource is `UNKNOWN`, and in authoritative mode also not as long as the inventory is incomplete (then `incomplete`, exit 13). A remaining `BLOCKED` operation gives `drift_detected` in `apply` just as in `plan`. An unexpected error (e.g. an adapter bug) only marks that target as failed; the remaining targets continue. stderr then shows only the error type; a traceback is shown only with `ORDIVUS_DEBUG=1` (may contain secrets, for debugging only).
 
@@ -177,5 +194,7 @@ ordivus drift -f ./config --format json | grep '"type": *"report"' > report.json
 ```
 
 Operations on non-modifiable or protected objects carry `"manageable": false` or `"system": true`. Passwords appear only as `CREATE_SECRET` and `SET_PASSWORD` (value always `<redacted>`), never among the changes of a `CREATE`. If a credential provider cannot determine the state of a secret, or if a secret is empty, the reason is given as `reason` on the credential operation (`UNKNOWN`, or `BLOCKED` if only manual intervention helps); an empty secret is never set as a password. All text in the report and in the logs is checked against the secrets read during the run and replaced (`<redacted>`).
+
+Report schema version `1.1` added the top-level lists `rules` (per configured rule and target: `status` `complete` or `incomplete`, `violations` count, `reason` if incomplete) and `violations` (`rule`, `target`, `kind`, `id`, `severity`, `message`) plus `summary.violations`; both lists are empty without a `Rules` document. Fields of `1.0` are unchanged.
 
 With `--output FILE`, the report goes to a file (newly created with permissions `0600`; a symlink as the destination is rejected). Ordivus overwrites an existing file only if it is a regular file owned by the calling user; it then also gets `0600`. If writing fails, the error appears on stderr and the run's exit code is preserved (e.g. 14 after a partial `apply`); only an otherwise successful run then exits with 1. Ordivus does not store reports itself; recording them is up to the calling system (CI artifact, log collection).

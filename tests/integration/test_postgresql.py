@@ -534,3 +534,25 @@ def test_export_roundtrip(pg, tmp_path):
         ("Grant", grant_id(p + "readers", p + "db", "database")),
         ("Grant", grant_id(p + "readers", p + "db", "schema", "s")),
         ("Grant", grant_id(p + "readers", p + "db", "tables-in-schema", "s"))}, tmp_path)
+
+
+def test_rules_detect_privileged_logins_and_table_writes(pg):
+    p = pg.p
+    pg.sql("CREATE ROLE {} LOGIN SUPERUSER", p + "su")
+    pg.sql("CREATE ROLE {} LOGIN CREATEROLE", p + "cr")
+    pg.sql("CREATE ROLE {} LOGIN", p + "etl")
+    pg.sql("CREATE ROLE {} LOGIN", p + "ro")
+    pg.sql("CREATE DATABASE {}", p + "rdb")
+    pg.sql("CREATE SCHEMA app; CREATE TABLE app.t1 (i int)", dbname=p + "rdb")
+    pg.sql("GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA app TO {}; GRANT SELECT ON ALL TABLES IN SCHEMA app TO {}",
+           p + "etl", p + "ro", dbname=p + "rdb")
+    path = pg.cfg(doc("Rules", "compliance", targetRef="pg", rules=[
+        {"id": "postgresql.superuser-login"}, {"id": "postgresql.createrole-login"},
+        {"id": "postgresql.table-write-grant", "allow": [p + "ro"]}]))
+    rep = run(path, "drift")
+    found = {(v["rule"], v["id"]) for v in rep["violations"]}
+    assert found == {("postgresql.superuser-login", p + "su"), ("postgresql.createrole-login", p + "cr"),
+                     ("postgresql.table-write-grant", grant_id(p + "etl", p + "rdb", "tables-in-schema", "app"))}
+    assert {r["status"] for r in rep["rules"]} == {"complete"} and report.exit_code(rep) == 0
+    assert main(["drift", "-f", str(path), "--fail-on", "violations"]) == 10
+    assert {o["action"] for o in rep["operations"]} == {"UNMANAGED"}  # nichts deklariert: Regeln ändern keine Ops

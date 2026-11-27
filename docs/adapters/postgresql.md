@@ -79,7 +79,7 @@ spec:
 | `memberOf` | List of roles; Ordivus grants and revokes memberships until exactly this set exists |
 | `connectionLimit` | `CONNECTION LIMIT`, integer ≥ -1 |
 | `createdb`, `createrole` | `CREATEDB`/`NOCREATEDB`, `CREATEROLE`/`NOCREATEROLE` |
-| `superuser` | **not manageable** – specifying it is a validation error |
+| `superuser` | **not manageable** – specifying it is a validation error; it is observed and checked by [rules](../rules.md) |
 
 Fields you omit are not managed, and therefore not reset either.
 
